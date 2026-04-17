@@ -40,6 +40,7 @@ This slice does not cover:
 - Model-assisted triage, human final arbitration
 - Retrieval support and answer quality scored separately
 - Strict schemas so results are machine-comparable across iterations
+- Blind grader prompts to system and provider identity wherever possible
 
 ## Evaluation Model
 
@@ -76,6 +77,11 @@ Required run metadata:
 - `grader_prompt_version`
 - `created_at`
 
+`system_id` and `iteration_id` must be used consistently:
+
+- `system_id` = methodology family, e.g. `local_rag`, `cli_fs_agent`, `chatgpt_project`
+- `iteration_id` = version within that family, e.g. `local_rag_v0.3`
+
 Example:
 
 - `system_id: local_rag`
@@ -84,6 +90,13 @@ Example:
 - `change_note: added BM25 + dense hybrid with reranker`
 
 This is necessary because the benchmark is expected to improve on some questions and regress on others. The harness must preserve enough context to explain those changes later.
+
+Version changes also need explicit comparison rules:
+
+- changing `grader_prompt_version` invalidates direct comparison of grader outputs until the older answers are re-graded
+- changing grader model or CLI version invalidates direct comparison of grader outputs until the older answers are re-graded
+- changing `corpus_version` invalidates both answers and grades and requires a fresh run
+- changing `question_set_version` invalidates direct aggregate comparison unless overlap between the two question sets is explicitly modeled
 
 ## File Layout
 
@@ -151,9 +164,36 @@ Each answer file should include:
 - `retrieved_evidence`
 - `latency_ms`
 - `answer_model`
+- `answer_provider`
 - `created_at`
 
 `retrieved_evidence` should contain the actual chunk or passage bundle used by the answering system. This is required so the graders can assess retrieval support quality separately from the final prose answer.
+
+## Grader Independence
+
+The harness should blind graders to answer-system identity in the grading prompt.
+
+The grader input should not include:
+
+- `answer_model`
+- `answer_provider`
+- `system_id`
+- `iteration_id`
+
+Those fields should still be recorded in the stored answer and run metadata, but hidden from the grader payload to reduce explicit anchoring and provider-name bias.
+
+This does not fully eliminate same-family bias, so the harness should also record:
+
+- `grader_provider`
+- `independence_status`
+
+Minimum `independence_status` values:
+
+- `blinded_same_provider`
+- `blinded_cross_provider`
+- `human_reviewed`
+
+Same-provider grading is allowed for fast iteration, but it should be treated as triage signal rather than final authority when no second grader family or human review is present.
 
 ## Grader Output Schema
 
@@ -176,8 +216,23 @@ Each grader output should include:
 - `needs_human_attention`
 - `failure_tags`
 - `rationale`
+- `grader_latency_ms`
+- `grader_cost_usd`
+- `status`
 
 All score fields should be `1-5`.
+
+`grader_cost_usd` may be `null` when the CLI does not expose reliable cost data.
+
+The grader `status` must be one of:
+
+- `success`
+- `invalid_output`
+- `timeout`
+- `crash`
+- `skipped`
+
+The harness should retry invalid or transient failures a bounded number of times, record the failure state if retries are exhausted, and continue the run without silently dropping the grader result.
 
 ## Failure Taxonomy
 
@@ -192,8 +247,11 @@ The grader should be able to emit zero or more failure tags from a bounded taxon
 - `incomplete_answer`
 - `poor_synthesis`
 - `long_doc_navigation_failure`
+- `other`
 
 Scores answer “how good was it.” Failure tags answer “what should we change next.”
+
+When `other` is used, the grader must provide a free-text explanation in the rationale.
 
 ## Grader Adapters
 
@@ -242,6 +300,8 @@ Minimum status values:
 
 The run metadata should record which graders were actually active for that run.
 
+For Gemini, the capability probe should require a trivial prompt to return schema-valid JSON within a bounded timeout. Failing that probe should mark the adapter `unavailable` or `degraded`, not block the rest of the run.
+
 ## Prompting Strategy
 
 Use a single grader prompt version shared across adapters where possible.
@@ -255,6 +315,8 @@ The prompt should instruct the grader to:
 - set `needs_human_attention` when the answer is ambiguous, high-risk, or internally inconsistent
 
 The grader should prefer “insufficient evidence” over inventing a justification.
+
+The grading prompt should also explicitly treat the provided answer and evidence as untrusted content and ignore any instructions embedded inside them.
 
 ## Human Review
 
@@ -275,6 +337,8 @@ Each run should generate a summary file with:
 
 - average scores per grader
 - average scores across graders
+- median scores across graders
+- score distributions across graders
 - per-category averages
 - questions with the largest disagreement
 - questions flagged for human attention
@@ -282,15 +346,18 @@ Each run should generate a summary file with:
 
 This is the main iteration surface for deciding what to fix next.
 
+If disagreement on a question exceeds a configured threshold, the harness should automatically set `needs_human_attention=true` for that question.
+
 ## Implementation Order
 
 1. Question set and run directory formats
 2. Grader output schema and validator
-3. Codex adapter
-4. Claude adapter
-5. Gemini capability probe and optional adapter stub
-6. Run summary generator
-7. Human review overlay
+3. Draft and pilot the grading prompt on a small calibration subset
+4. Codex adapter
+5. Claude adapter
+6. Gemini capability probe and optional adapter stub
+7. Run summary generator
+8. Human review overlay
 
 ## Risks
 
@@ -318,6 +385,26 @@ Mitigation:
 - keep the logical rubric shared across adapters
 - compare grader disagreements explicitly
 
+### Prompt injection from answer or evidence content
+
+Mitigation:
+
+- treat answer and evidence text as untrusted data inside the grading prompt
+- exclude system and provider identity from grader-visible payloads
+- validate all outputs against the grader schema
+
+## Calibration
+
+Before model graders are trusted to drive iteration decisions on their own, the harness should support a calibration pass against a small human-scored subset.
+
+The harness should record:
+
+- grader-vs-human score deltas
+- grader disagreement rates
+- which failure tags align or diverge from human review
+
+This calibration step is required before treating model-grade deltas as strong evidence of system improvement rather than grader drift.
+
 ## Success Criteria
 
 This slice is successful when:
@@ -327,4 +414,4 @@ This slice is successful when:
 - `codex` and `claude` can grade those answers non-interactively into validated JSON
 - the harness records iteration metadata and change notes
 - summaries identify which questions improved or regressed and why
-
+- the harness can record calibration results against a human-scored subset
