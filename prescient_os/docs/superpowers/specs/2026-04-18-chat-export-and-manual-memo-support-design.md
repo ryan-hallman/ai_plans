@@ -11,6 +11,8 @@ This design defines a narrow support slice for the retrieval benchmark:
 
 This is not KE product modeling work. It is benchmark support for testing retrieval methodology with more realistic founder/company data.
 
+This support corpus may later be useful for product validation, but the v0 design is still benchmark-first: preserve source evidence, keep the format sparse, and avoid introducing product workflows or ontology work.
+
 ## Scope
 
 ### In scope
@@ -48,7 +50,13 @@ The export should use a sparse, two-layer structure:
 
 ### Raw layer
 
-The raw layer preserves provider-native session exports exactly as obtained from the user-profile space. This is the audit and reprocessing source of truth.
+The raw layer preserves provider-native session exports exactly as obtained from the user-profile space.
+
+Its purpose is narrow:
+
+- audit
+- re-normalization if the schema changes
+- re-export/dedup verification across machines
 
 ### Normalized layer
 
@@ -67,14 +75,23 @@ Required fields:
   - `role`
   - `content_text`
 
+`content_hash` is required because it supports:
+
+- re-export detection
+- dedup across workstations
+- provenance checking when the same session is moved through multiple local corpus snapshots
+
 Optional fields:
 
 - `title`
-- `model`
-- `has_tool_calls`
-- `system_prompt_present`
 - `provider_metadata`
 - message-level `timestamp`
+
+`provider_metadata` is the place for any provider-specific richness we want to preserve without baking it into the normalized schema, for example:
+
+- model identifiers
+- tool-call presence
+- system-prompt presence
 
 ### Messages
 
@@ -86,6 +103,16 @@ Messages should preserve roles explicitly:
 - `tool` if present and easily exportable
 
 System messages should be preserved in normalized sessions but excluded from retrieval indexing by default later.
+
+## Session granularity
+
+For v0 normalization:
+
+- one exported provider conversation/thread maps to one normalized session
+- do not merge sessions across providers
+- do not merge separate provider sessions into day-level bundles during export
+
+If a provider export format is coarse or ambiguous, preserve the provider-native boundary and note it in `provider_metadata`.
 
 ## Import posture
 
@@ -99,6 +126,27 @@ The import path should preserve:
 - enough provenance to support later point-in-time curation
 
 The import path should not attempt to infer business entities, company ontology, or durable artifacts.
+
+## Eval fit
+
+This support slice exists to improve retrieval evaluation, not to create a general-purpose company-memory substrate.
+
+v0 expectations:
+
+- approximately `100-500` imported chat sessions
+- approximately `10-30` manually curated memos
+- approximately `15-25` retrieval benchmark questions authored by the user against the imported corpus
+
+The benchmark questions should intentionally cover:
+
+- temporal conflicts
+- pivots and superseded claims
+- scope disambiguation
+- point-in-time understandings that later changed
+
+Evidence keys / ground-truth authoring are defined separately in the eval harness work, but this corpus is expected to support that process directly.
+
+Imported chats and memos are expected to contain conflicting point-in-time statements. That is a feature of the benchmark, not something the import pipeline should normalize away.
 
 ## Manual memo layer
 
@@ -130,21 +178,20 @@ Recommended fields:
   - optional message ranges
   - optional git refs
 
-## Organization model
+For v0, `topic_bucket` is just a string. We do not predefine or bless a benchmark taxonomy in this slice.
 
-For PrescientOS benchmark materials, durable organization should be topic-first, with time-based memos as supporting artifacts.
+## Privacy and storage boundary
 
-Recommended top-level buckets:
+This corpus is private founder/company material.
 
-- `Product Strategy`
-- `Knowledge Engine`
-- `Evaluation and Benchmarks`
-- `Corpus and Source Material`
-- `Engineering and Infrastructure`
-- `Go-to-Market and Market Learning`
-- `Company Operations`
+Rules:
 
-Time-based memos such as weekly or monthly updates should exist as artifact types with timestamps, not as the primary taxonomy.
+- keep it local by default
+- do not commit it to this code repository
+- do not put it in a shared or public repository by accident
+- any artifact sharing requires redaction review
+
+If version control is useful, use a **separate private corpus repo** with explicit access controls. That is compatible with this design and keeps private benchmark data isolated from the product codebase.
 
 ## Why this is the right boundary
 
