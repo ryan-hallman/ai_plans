@@ -90,6 +90,7 @@ The scorer should also load the corresponding evidence key fields:
 - `required_sources`
 - `required_claims`
 - `acceptable_evidence`
+- claim-level role metadata used by resolution rules
 - `minimum_sufficient_set`
 - `resolution_rule`
 - optional `notes_on_conflicts`
@@ -104,6 +105,8 @@ The scorer should emit one retrieval score record per question with:
 - `iteration_id`
 - `question_set_version`
 - `corpus_version`
+- `scorer_version`
+- `metric_schema_version`
 - `metrics`
   - `required_doc_coverage`
   - `required_source_coverage`
@@ -138,9 +141,19 @@ Recommended rules:
   - same logic as required-doc coverage, but against `required_sources`
 
 - `claim_coverage`
-  - a claim is matched if any retrieved evidence item:
+  - retrieved evidence should first be grouped by `doc_id` and ordered by
+    `retrieval_rank`
+  - for each `doc_id`, the scorer should concatenate the retrieved text for that
+    document in rank order
+  - a claim is matched if any acceptable evidence entry:
     - has the same `doc_id`
-    - and contains the `excerpt` substring exactly
+    - and the concatenated text for that `doc_id` contains the `excerpt`
+      substring exactly
+
+This keeps matching deterministic while reducing accidental misses caused by one
+chunk boundary cutting through an excerpt span. It still intentionally assumes
+that the retriever surfaced enough contiguous text for the excerpt to exist in
+the retrieved bundle.
 
 - `minimum_sufficient_set_satisfied`
   - true only if every claim ID in `minimum_sufficient_set` is matched
@@ -156,6 +169,11 @@ Recommended rules:
   - `noise_count / total_retrieved_items`
   - `0.0` if no evidence items are present
 
+- `failure`
+  - a question counts as a deterministic retrieval failure if either:
+    - `minimum_sufficient_set_satisfied` is false
+    - `resolution_rule_satisfied` is false
+
 The scorer should not do:
 
 - approximate substring matching
@@ -170,26 +188,46 @@ If an excerpt cannot be matched literally, the evidence key should be fixed.
 The first scorer should support only deterministic assertions over matched
 claims and sources.
 
+To make the rule checks real rather than decorative, the evidence-key schema
+should carry explicit claim-level metadata used only by the scorer:
+
+- `claim_role`
+  - `current`
+  - `superseded`
+  - `period_a`
+  - `period_b`
+  - `supporting`
+
+The scorer should also resolve a deterministic source kind for every matched
+`doc_id`:
+
+- `memo`
+- `raw_session`
+
+For the private corpus, source kind should be derived from the private snapshot
+manifest and memo/session file lists rather than inferred from slug shape.
+
 Recommended first-pass rule behavior:
 
 - `latest_wins`
   - requires the minimum sufficient set
 
 - `must_compare_periods`
-  - requires the minimum sufficient set and evidence from at least two required
-    docs or sources
+  - requires the minimum sufficient set
+  - requires matched claims from both `period_a` and `period_b`
 
 - `must_surface_conflict`
-  - requires the minimum sufficient set and evidence from both the superseded
-    and current framing
+  - requires the minimum sufficient set
+  - requires matched claims from both `superseded` and `current`
 
 - `memo_plus_raw`
-  - requires the minimum sufficient set and at least one matched memo source and
-    one matched raw session source
+  - requires the minimum sufficient set
+  - requires at least one matched memo source and one matched raw session
+    source
 
 - `raw_only`
-  - requires the minimum sufficient set and all matched evidence must come from
-    raw session sources, not memos
+  - requires the minimum sufficient set
+  - requires all matched evidence to come from raw session sources, not memos
 
 This logic should be explicit in code and tied to the current private corpus
 conventions rather than inferred from prose.
@@ -203,7 +241,10 @@ Run summary generation should gain a second deterministic block:
   - average required-source coverage
   - average claim coverage
   - rate of `minimum_sufficient_set_satisfied`
-  - average or median `first_required_evidence_rank`
+  - `hit_rate`
+    - share of questions with any matched required evidence
+  - `mrr`
+    - reciprocal-rank aggregate over `first_required_evidence_rank`
   - average `noise_ratio`
   - rate of `resolution_rule_satisfied`
   - per-question failure list
@@ -211,6 +252,9 @@ Run summary generation should gain a second deterministic block:
 
 This retrieval summary should be kept separate from the existing model-grader
 summary so retrieval tuning has a clean optimization surface.
+
+If a run has no retrieval score records yet, summary generation should tolerate
+that and omit the retrieval summary block rather than failing the whole run.
 
 ## Testing Requirements
 
@@ -222,6 +266,8 @@ The first implementation should be test-driven and include:
 - unit tests for score-record writing and summary aggregation
 - at least one integration-style test over the current private evidence keys and
   a synthetic retrieval bundle
+- at least one frozen regression test using a known retrieval bundle against the
+  real `prescient_private_v1` evidence keys
 
 The scorer should be treated as benchmark infrastructure, so deterministic tests
 matter more than automation breadth.
@@ -232,6 +278,7 @@ Keep the first implementation pass narrow.
 
 Implement:
 
+- minimal evidence-key schema expansion for claim-role metadata
 - retrieval score record model(s)
 - pure scoring function(s) over `retrieved_evidence`
 - retrieval-score file writing
@@ -243,7 +290,9 @@ Do not implement yet:
 - retriever execution
 - end-to-end benchmark automation
 - prose answer judging
-- evidence-key schema expansion beyond what the scorer immediately needs
+- broader locator typing or fuzzy matching
+- schema expansion beyond the minimum needed for deterministic resolution-rule
+  checks
 
 The goal of this slice is to make retrieval quality measurable over the private
 corpus with deterministic evidence-key scoring.
