@@ -126,7 +126,7 @@ def test_knowledge_answer_requires_citations_for_answered_status() -> None:
         source_id="source-360-wsm",
         unit_id="unit-360-wsm-p12",
         locator_kind="rendered_page",
-        target="derived/workshop_manuals/source-360-wsm/pages/page-0012.webp",
+        target="derived/workshop_manuals/source-360-wsm/pages/page-0012.png",
         page_number=12,
     )
     citation = EvidenceCitation(
@@ -519,7 +519,7 @@ def test_store_round_trips_source_units_and_locators(tmp_path: Path) -> None:
         source_id=source.source_id,
         unit_id=unit.unit_id,
         locator_kind="rendered_page",
-        target="derived/pages/page-0001.webp",
+        target="derived/pages/page-0001.png",
         page_number=1,
     )
 
@@ -716,7 +716,7 @@ def test_ingest_pdf_source_extracts_pages_locators_and_structures(tmp_path: Path
     assert result.page_count == 2
     assert len(store.units_for_source("source-fixture")) == 2
     assert store.locator_for_unit("unit-source-fixture-p1") is not None
-    assert (tmp_path / "rendered" / "source-fixture" / "page-0001.webp").exists()
+    assert (tmp_path / "rendered" / "source-fixture" / "page-0001.png").exists()
     assert store.list_structures()[0].heading == "A. ENGINE"
 ```
 
@@ -803,7 +803,7 @@ def ingest_pdf_source(
                 structure_start = page_number
 
             unit_id = f"unit-{source_config.source_id}-p{page_number}"
-            rendered_path = rendered_source_root / f"page-{page_number:04d}.webp"
+            rendered_path = rendered_source_root / f"page-{page_number:04d}.png"
             if not rendered_path.exists():
                 pixmap = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
                 pixmap.save(rendered_path)
@@ -993,7 +993,7 @@ def test_workshop_search_returns_page_locator_and_structure(opensearch_client, t
                 source_id="source-fixture",
                 unit_id="unit-source-fixture-p1",
                 locator_kind="rendered_page",
-                target="/rendered/page-0001.webp",
+                target="/rendered/page-0001.png",
                 page_number=1,
             )
         ]
@@ -1244,7 +1244,7 @@ def _store_with_one_supported_page(tmp_path: Path) -> WorkshopManualStore:
         source_id=source.source_id,
         unit_id=unit.unit_id,
         locator_kind="rendered_page",
-        target="/rendered/page-0001.webp",
+        target="/rendered/page-0001.png",
         page_number=1,
     )
     store.upsert_source(source)
@@ -1475,7 +1475,7 @@ def test_ask_knowledge_route_returns_structured_answer(tmp_path: Path, monkeypat
                 source_id="source-ferrari-360-wsm",
                 unit_id="unit-source-ferrari-360-wsm-p1",
                 locator_kind="rendered_page",
-                target="/rendered/page-0001.webp",
+                target="/rendered/page-0001.png",
                 page_number=1,
             )
         ]
@@ -2063,7 +2063,7 @@ Add:
 ```python
 @router.get("/citation-page")
 def citation_page(target: str) -> FileResponse:
-    return FileResponse(target, media_type="image/webp")
+    return FileResponse(target, media_type="image/png")
 ```
 
 - [ ] **Step 6: Add Docker frontend service**
@@ -2149,7 +2149,7 @@ def _seed_api_store(data_root: Path) -> WorkshopManualStore:
                 source_id="source-ferrari-360-wsm",
                 unit_id="unit-source-ferrari-360-wsm-p1",
                 locator_kind="rendered_page",
-                target="/rendered/page-0001.webp",
+                target="/rendered/page-0001.png",
                 page_number=1,
             )
         ]
