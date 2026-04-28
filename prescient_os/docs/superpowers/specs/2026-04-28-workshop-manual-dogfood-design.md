@@ -18,6 +18,43 @@ The active repository direction is an API-first knowledge engine that privileges
 
 The user is actively working on a Ferrari 360, so the first slice should become usable before a complete evaluation suite exists. Real shop questions should then feed the evaluation corpus.
 
+## Relationship To Prior Vehicle-Manuals Idea
+
+This spec supersedes one guardrail in `docs/superpowers/ideas/2026-04-22-vehicle-manuals-validation-corpus.md`.
+
+That idea doc argued for validation through the retrieval scorer only and explicitly rejected Ferrari-specific UI. That was the right caution when the manuals were only a validation corpus. The implementation direction changed because the user identified a stronger iteration loop: the system will improve fastest if it can be used during real shop work, then convert real interactions into evaluation cases.
+
+The decision is:
+
+- Build a dogfood UI and MCP access path because daily use is the fastest way to discover retrieval failures.
+- Keep those access paths as thin probes over shared KE services, not as an automotive product surface.
+- Continue to treat the scorer and evidence key as the validation authority once enough real questions have been captured.
+- Preserve the prior guardrails against car-only artifact types, car-only extractors, and shop-workflow automation.
+
+This is not a pivot from KE-first to automotive. It is a decision to use automotive repair as a high-pressure, personally useful corpus while keeping the underlying source, scope, evidence, retrieval, and citation model horizontal.
+
+## Implementation Placement And Reuse
+
+Implementation should extend the current `prescient_benchmark` code path before introducing new infrastructure.
+
+Existing modules to reuse or evolve:
+
+- `prescient_benchmark/retrieval/index.py` for OpenSearch indexing, index identity, and reuse behavior.
+- `prescient_benchmark/retrieval/search.py` for lexical search entry points.
+- `prescient_benchmark/retrieval/chunk.py` and `parse.py` as the initial text normalization and chunking baseline, while adding page-aware units for PDFs.
+- `prescient_benchmark/retrieval/answer.py` as the nearest existing answer/citation contract, to be replaced or extended by the generic answer contract below.
+- `prescient_benchmark/eval/orchestrator.py`, retrieval records, and evidence keys for scoring promoted dogfood interactions.
+- Existing FastAPI route patterns under `prescient_benchmark/api/` for the web/MCP backend service boundary.
+
+New work should be placed as a small workshop-manual dogfood slice inside the benchmark package unless the implementation plan identifies a concrete reason to split it. The planned shape is:
+
+- generic source/evidence models under a KE-oriented module
+- PDF/manual ingestion adapters under a source-specific module
+- web and MCP adapters that call the same application service
+- eval promotion utilities that write into the existing eval formats
+
+The implementation plan must state the "why" for each major sequencing and infrastructure choice. In particular, it must explain when we are reusing benchmark infrastructure, when we are extending it, and when we are deliberately deferring the future production architecture.
+
 ## Product Scope
 
 V1 is an interaction-first manual assistant for the 360 family.
@@ -27,8 +64,8 @@ Included:
 - Seed one active vehicle profile for the user's Ferrari 360 Modena.
 - Ingest 360-family manuals from `~/Projects/workshop_manuals`.
 - Include the base 360 Modena workshop manual and related 360 Challenge, Challenge Stradale, and gearbox manuals.
-- Provide a basic web chat for repair questions.
-- Provide an MCP server so Hermes can query the same backend when the user is away from the web UI.
+- Provide a basic web chat probe for repair questions.
+- Provide an MCP probe so Hermes can query the same backend when the user is away from the web UI.
 - Return conservative answers with exact manual citations.
 - Let the user open a cited source page directly from each citation.
 - Capture failed, ambiguous, or manually corrected answers as candidate eval cases.
@@ -65,6 +102,8 @@ Fields should include:
 - linked entities
 - linked source collections
 
+`KnowledgeScope` owns the generic scope contract. `VehicleProfile` is a linked entity that provides vehicle-specific attributes used by the scope resolver. Query services should depend on `KnowledgeScope` plus resolved source collections, not on `VehicleProfile` directly.
+
 ### VehicleProfile
 
 A v1 specialization used to seed the active car.
@@ -80,6 +119,13 @@ Fields should include:
 - related manual collections that require explicit query evidence or clarification
 
 No CRUD is required in v1. The profile can be seeded from config or fixture data.
+
+Variant detection should use this profile in two stages:
+
+1. Deterministic alias matching against make, model, variant, year, chassis/engine aliases, and manual-family aliases.
+2. LLM-assisted classification only when deterministic matching cannot decide whether a query refers to the default 360 Modena or an adjacent 360 variant.
+
+Low-confidence classification must produce `needs clarification`, not a guessed answer.
 
 ### Source
 
@@ -109,6 +155,17 @@ Fields should include:
 - applicability metadata
 
 For the first slice, each workshop manual PDF is a `Source`.
+
+`provider processing permissions` should be explicit source-level policy, not an opaque note. V1 should support:
+
+- cloud LLM allowed
+- cloud OCR allowed
+- cloud embedding allowed
+- provider must not retain training data
+- provider must not retain inputs beyond service operation
+- local-only required
+
+The user's manuals may use cloud processing in v1, but source policy must be modeled so later local-only sources can use the same pipeline safely.
 
 ### SourceUnit
 
@@ -229,20 +286,50 @@ The first ingestion pass should:
 
 The pipeline should be resumable and fingerprint-based. Re-running ingestion should skip unchanged sources and replace derived units only when the source fingerprint or extraction settings change.
 
+V1 should not bypass the current retrieval stack. It should adapt PDF pages and inferred structures into the existing indexing path, then evolve that path where page-level evidence requires richer fields than today's `InMemoryDocument` and chunk-only locator model.
+
+### Section Governance
+
+Section governance is the headline ingestion problem. Torque tables often appear at the beginning of a section while the relevant bolt appears later, so page-only retrieval can return a number without its governed object or procedure.
+
+V1 section inference should use this order:
+
+1. PDF outline/bookmark entries when present.
+2. Page labels, visible headings, and section-number patterns.
+3. Heading-range heuristics that assign each page to the nearest active section until the next peer heading.
+4. LLM-assisted section repair only for high-value failures discovered during dogfood use.
+
+Each `SourceStructure` should record its inference method and confidence. Low-confidence structure can still support candidate-section display, but the answer synthesizer should treat it as weaker support than explicit outline or heading evidence.
+
+Known v1 limitation: some manuals will have imperfect section ranges. The conservative answer policy is the mitigation: when the system cannot establish that a table and procedure belong to the same section, it should show candidate pages or ask for clarification instead of asserting the torque value.
+
 ## Retrieval And Answering Flow
 
-The query path should be:
+The retrieval design should be agent-with-primitives, not a fixed RAG pipeline. V1 can execute a conservative default strategy, but the application boundary should expose retrieval primitives that can later be selected iteratively.
 
-1. Accept the user question and optional scope.
-2. Resolve scope against the seeded 360 Modena profile.
-3. Detect whether the question names or implies an adjacent variant.
-4. Ask a clarification question when variant or manual scope is ambiguous.
-5. Search within the scoped source set using lexical search and query expansion.
-6. Expand promising hits to their enclosing section or procedure when structure is available.
-7. Read the selected section/page span with the LLM.
-8. Synthesize an answer only from selected evidence.
-9. Return cited evidence with locators that open exact source pages.
-10. Record the query, selected evidence, answer status, and user correction markers for evaluation.
+Required primitives:
+
+- `resolve_scope`: map the question and optional supplied scope to a `KnowledgeScope`.
+- `expand_aliases`: derive deterministic and LLM-assisted aliases for vehicle, system, part, procedure, and manual vocabulary.
+- `search_units`: search scoped `SourceUnit` records with lexical search and query expansion.
+- `walk_structure`: move from a hit page to its enclosing section, procedure, table span, figure span, or neighboring pages.
+- `read_evidence_span`: read a selected page or section span with the LLM.
+- `enforce_citations`: verify that each material claim is backed by a cited `EvidencePassage`.
+- `ask_clarification`: return a structured clarification when scope or support is ambiguous.
+- `record_trace`: persist the primitive calls, selected evidence, and answer status for eval promotion.
+
+The default v1 strategy should:
+
+1. Resolve scope against the seeded 360 Modena profile.
+2. Run alias expansion for the question and scope.
+3. Search within the resolved source set.
+4. Walk from promising hits to enclosing structures and neighboring pages.
+5. Read selected evidence spans.
+6. Synthesize only from selected evidence.
+7. Enforce citation support before returning an answer.
+8. Record the trace and feedback hooks.
+
+This gives the first usable version a predictable path while preserving the thesis that retrieval is a set of composable primitives rather than a one-shot top-k answer generator.
 
 The v1 answer policy is conservative:
 
@@ -260,11 +347,14 @@ Required v1 views:
 - Chat panel with the active vehicle scope visible.
 - Answer view with cited passages.
 - Citation list with manual title, page number, section heading when known, and support reason.
-- Page viewer that opens the cited PDF page or rendered page image.
+- Page viewer that opens the rendered page image served by the app.
+- Secondary source metadata that records the original PDF path and page number.
 - Clarification state when the backend needs the user to choose vehicle, variant, or manual.
 - Lightweight feedback controls for "helpful", "wrong", "wrong manual", and "missing citation".
 
 The UI does not need vehicle management, account management, notification flows, or an artifact library in v1.
+
+The UI is not a durable automotive product surface. It is a dogfood probe over the same API contracts that the MCP server and future business UI should use.
 
 ## MCP Interface
 
@@ -272,10 +362,10 @@ The MCP server should be a thin adapter over the same application service used b
 
 Required v1 tools:
 
-- `ask_manual_question`: ask a question against the active or supplied scope and return the same answer contract as the web UI.
-- `resolve_manual_scope`: inspect how the system resolved vehicle/manual scope for a question.
+- `ask_knowledge_question`: ask a question against the active or supplied scope and return the same answer contract as the web UI.
+- `resolve_knowledge_scope`: inspect how the system resolved vehicle/manual scope for a question.
 - `get_citation_page`: return locator metadata for a cited page or source unit so Hermes can show or summarize the evidence.
-- `record_manual_feedback`: submit correction or usefulness feedback for later eval conversion.
+- `record_answer_feedback`: submit correction or usefulness feedback for later eval conversion.
 
 The MCP contract should preserve answer status and citations exactly. A caller should be able to distinguish answered, needs-clarification, and insufficient-evidence responses without parsing prose.
 
@@ -301,16 +391,19 @@ Provider calls should record:
 - output fingerprint
 - processing timestamp
 - extraction or answer quality metadata when available
+- source permission policy that authorized the call
 
 ## Persistence
 
 V1 may use simple local persistence as long as the boundaries match the future KE architecture.
 
-Expected stores:
+Target production stores:
 
 - Postgres for source, unit, structure, locator, answer, and feedback metadata.
 - OpenSearch for lexical retrieval over source units and structures.
 - Local filesystem cache for rendered page images and derived extraction artifacts.
+
+Dogfood v1 may start with file-backed manifests plus OpenSearch if that is the shortest path inside `prescient_benchmark`. If so, repository ports should still be shaped so a later Postgres adapter can replace the file manifest without changing retrieval, UI, MCP, or eval contracts.
 
 The implementation should not require storing original PDFs inside the application repo. Source paths can reference `~/Projects/workshop_manuals`, and derived artifacts should live under an ignored local data/cache directory.
 
@@ -338,6 +431,24 @@ The first eval suite should be promoted from real usage. Candidate categories:
 - ambiguous variant question
 - honest gap where the manual does not contain the requested fact
 
+Promotion workflow:
+
+1. Capture every dogfood interaction as a candidate record.
+2. Mark candidates that have user feedback, corrections, low confidence, or missing citations.
+3. Triage marked candidates into eval questions with expected source units and required claims.
+4. Write promoted cases into the existing private question set and evidence-key format.
+5. Score promoted cases with the existing retrieval scorer.
+
+The first validation milestone should inherit the idea doc's thresholds:
+
+- 40-60 promoted questions across torque lookup, procedure, figure, structure, ambiguity, vocabulary, and honest-gap cases.
+- Scope extraction identifies or clarifies vehicle/variant in at least 90% of scoped questions.
+- Citation coverage is at least 95% for numeric or procedural claims.
+- Honest-gap questions return insufficient evidence at least 80% of the time.
+- Agent-with-primitives retrieval beats the classical RAG baseline on retrieval-support score.
+
+These thresholds should not block the first usable dogfood UI. They define when the dogfood slice has enough evidence to validate or revise the retrieval thesis.
+
 ## Error Handling
 
 Ingestion errors should be source-local. A failed PDF, page render, or OCR pass should not block unrelated manuals.
@@ -364,21 +475,23 @@ Required v1 coverage:
 - Conservative answer status when evidence is missing.
 - Citation serialization shared by API and MCP responses.
 - Feedback capture for future eval conversion.
+- Mocked `LlmProvider` behavior for supported, unsupported, ambiguous, and provider-failure answers.
+- Retrieval trace capture without relying on live model calls.
 
 Integration tests should cover a tiny fixture PDF or synthetic page set rather than the copyrighted workshop manuals.
 
 ## Contract Stability
 
-The first stable contracts should be:
+The first stable contracts should use generic names from day one:
 
-- `AskManualQuestionRequest`
-- `ManualAnswer`
-- `ManualCitation`
-- `ManualScopeResolution`
+- `AskKnowledgeQuestionRequest`
+- `KnowledgeAnswer`
+- `EvidenceCitation`
+- `KnowledgeScopeResolution`
 - `CitationPageLocator`
-- `ManualFeedback`
+- `AnswerFeedback`
 
-These names can later become more generic once the implementation proves the shape. The internal model should remain generic enough that the contracts can evolve toward `AskKnowledgeQuestion`, `KnowledgeAnswer`, and `EvidenceCitation` without rewriting retrieval.
+Vehicle/manual details should appear inside scope and source metadata, not in top-level contract names. This avoids a later rename from manual-specific API names to KE-wide API names.
 
 ## Follow-On Work
 
@@ -389,7 +502,22 @@ After the first usable slice:
 3. Add forum or web-source ingestion using the same `Source` and `SourceUnit` model.
 4. Add vehicle profile CRUD only after the seeded profile becomes limiting.
 5. Compare the interaction-first agent path against a classical RAG baseline.
-6. Generalize naming from manual-specific API contracts to broader KE contracts once the shape stabilizes.
+6. Add a Postgres adapter for source/evidence metadata if dogfood v1 starts with file-backed manifests.
+
+## Implementation Plan Requirements
+
+The implementation plan derived from this spec must clearly explain the "why" behind sequencing and design decisions, not just list tasks.
+
+At minimum, the plan should explain:
+
+- Why the first slice starts with daily dogfood interaction instead of a complete eval suite.
+- Why web UI and MCP are thin adapters over one backend service.
+- Why the implementation extends `prescient_benchmark` before introducing new production infrastructure.
+- Why rendered page images are the primary citation-viewing path.
+- Why section governance starts with outlines and heading-range heuristics.
+- Why generic source/evidence contracts are used even though the first corpus is automotive.
+- Why Postgres can be deferred only if the port boundary remains compatible with the target KE architecture.
+- Why each beads issue exists and how it links back to this spec and the implementation plan.
 
 ## Success Criteria
 
@@ -398,7 +526,9 @@ V1 is successful when:
 - The user can ask real 360 shop questions through the web UI.
 - Hermes can ask the same questions through MCP.
 - Answers either cite exact manual pages or refuse to answer definitively.
-- Citation links open the cited page or rendered page image.
+- Citation links open the cited rendered page image.
 - The system asks for clarification instead of mixing 360 Modena, Challenge Stradale, and Challenge evidence.
 - Real shop interactions create reusable eval candidates.
 - The implementation remains provider-swappable and does not hard-code car-only retrieval logic into the KE spine.
+
+The follow-on validation milestone is successful when the promoted question set meets the quantitative thresholds listed in the Evaluation Capture section.
