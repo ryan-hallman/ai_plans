@@ -10,6 +10,17 @@
 
 ---
 
+## Boundary Rules
+
+This slice should be easy to refactor into the future DDD structure:
+
+- Domain models in `artifacts/models.py` must not import FastAPI, psycopg, SQL, filesystem stores, or route modules.
+- Application services such as extraction, assembly, feedback triage, and answering should depend on the `ArtifactRepository` protocol, not on `PostgresArtifactRepository`.
+- Postgres-specific SQL, connection handling, JSON serialization, and schema bootstrap stay in `artifacts/postgres.py`.
+- API routes and CLI commands are adapters. They may construct repositories and call application services, but they should not contain artifact assembly logic or SQL.
+- Workshop-specific rules live in `artifacts/workshop_*` modules so the core artifact model remains usable for business docs, chats, emails, and forums later.
+- Existing JSON workshop store and OpenSearch retrieval remain evidence/fallback adapters, not dependencies of the artifact domain.
+
 ## File Map
 
 - `pyproject.toml`: add `psycopg[binary]` for Postgres access.
@@ -35,7 +46,7 @@
 - Modify: `docker-compose.yml`
 - Modify: `apps/api/src/prescient_benchmark/config.py`
 
-- [ ] **Step 1: Write the failing settings test**
+- [x] **Step 1: Write the failing settings test**
 
 Create `tests/unit/test_artifact_config.py`:
 
@@ -49,13 +60,13 @@ def test_artifact_database_url_is_configurable() -> None:
     assert settings.artifact_database_url == "postgresql://user:pass@db:5432/prescient"
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run python -m pytest tests/unit/test_artifact_config.py -q`
 
 Expected: fails because `artifact_database_url` does not exist.
 
-- [ ] **Step 3: Add config and dependency**
+- [x] **Step 3: Add config and dependency**
 
 Add `psycopg[binary]>=3.2` to `pyproject.toml`.
 
@@ -90,13 +101,13 @@ volumes:
   postgres_data:
 ```
 
-- [ ] **Step 4: Verify config test passes**
+- [x] **Step 4: Verify config test passes**
 
 Run: `uv run python -m pytest tests/unit/test_artifact_config.py -q`
 
 Expected: pass.
 
-- [ ] **Step 5: Refresh lockfile**
+- [x] **Step 5: Refresh lockfile**
 
 Run: `uv lock`
 
@@ -109,7 +120,7 @@ Expected: `uv.lock` updates with psycopg packages.
 - Create: `apps/api/src/prescient_benchmark/artifacts/models.py`
 - Test: `tests/unit/test_artifact_models.py`
 
-- [ ] **Step 1: Write failing model tests**
+- [x] **Step 1: Write failing model tests**
 
 Create `tests/unit/test_artifact_models.py` with tests that construct:
 
@@ -162,17 +173,17 @@ def test_artifact_claim_uses_three_v1_trust_states() -> None:
     assert claim.trust_state is ArtifactTrustState.EXTRACTED
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `uv run python -m pytest tests/unit/test_artifact_models.py -q`
 
 Expected: import failure for missing `prescient_benchmark.artifacts`.
 
-- [ ] **Step 3: Implement models**
+- [x] **Step 3: Implement models**
 
 Create Pydantic models/enums for `SourceAuthority`, `ObservationClaimType`, `ArtifactTrustState`, `ExtractionRun`, `Observation`, `ArtifactClaim`, `Artifact`, `ArtifactEvent`, `ValidationEvent`, and `ArtifactAnswerMode`.
 
-- [ ] **Step 4: Verify model tests pass**
+- [x] **Step 4: Verify model tests pass**
 
 Run: `uv run python -m pytest tests/unit/test_artifact_models.py -q`
 
@@ -185,7 +196,7 @@ Expected: pass.
 - Create: `apps/api/src/prescient_benchmark/artifacts/postgres.py`
 - Test: `tests/unit/test_artifact_repository.py`
 
-- [ ] **Step 1: Write repository contract tests with a fake connection**
+- [x] **Step 1: Write repository contract tests with a fake connection**
 
 Use a focused fake or monkeypatch around `PostgresArtifactRepository` methods to verify SQL-independent behavior:
 
@@ -202,13 +213,13 @@ def test_disabled_repository_returns_no_artifact() -> None:
     ) is None
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run python -m pytest tests/unit/test_artifact_repository.py -q`
 
 Expected: import failure.
 
-- [ ] **Step 3: Implement repository protocol and Postgres schema bootstrap**
+- [x] **Step 3: Implement repository protocol and Postgres schema bootstrap**
 
 `repository.py` should define `ArtifactRepository` and `DisabledArtifactRepository`.
 
@@ -222,7 +233,7 @@ class PostgresArtifactRepository: ...
 
 The schema should include tables for `artifact_extraction_runs`, `artifact_observations`, `artifacts`, `artifact_claims`, `artifact_events`, `artifact_validation_events`, and `artifact_current_projection`.
 
-- [ ] **Step 4: Verify repository tests pass**
+- [x] **Step 4: Verify repository tests pass**
 
 Run: `uv run python -m pytest tests/unit/test_artifact_repository.py -q`
 
@@ -235,25 +246,25 @@ Expected: pass.
 - Create: `apps/api/src/prescient_benchmark/artifacts/workshop_assembly.py`
 - Test: `tests/unit/test_workshop_artifact_extraction.py`
 
-- [ ] **Step 1: Write failing extraction and assembly tests**
+- [x] **Step 1: Write failing extraction and assembly tests**
 
 Test that a source unit containing `Lower arm to chassis nuts 55 Nm` emits a torque observation with normalized `lower control arm` terms, confidence factors, and exact unit provenance. Test that assembly produces a `component_spec_artifact` with an extracted claim.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `uv run python -m pytest tests/unit/test_workshop_artifact_extraction.py -q`
 
 Expected: import failure.
 
-- [ ] **Step 3: Implement extractor**
+- [x] **Step 3: Implement extractor**
 
 Implement deterministic parsing for `Nm` torque lines using explicit regexes, source authority defaults for workshop manuals, and alias normalization for `LCA`, `wishbone`, `lower arm`, and `lower control arm`.
 
-- [ ] **Step 4: Implement assembler**
+- [x] **Step 4: Implement assembler**
 
 Group torque observations by scope/component/fastener/value and create `Artifact` records with `ArtifactClaim` records in `extracted` state.
 
-- [ ] **Step 5: Verify extraction tests pass**
+- [x] **Step 5: Verify extraction tests pass**
 
 Run: `uv run python -m pytest tests/unit/test_workshop_artifact_extraction.py -q`
 
@@ -267,7 +278,7 @@ Expected: pass.
 - Test: `tests/unit/test_workshop_artifact_answer.py`
 - Test: `tests/integration/test_workshop_api.py`
 
-- [ ] **Step 1: Write failing answer service test**
+- [x] **Step 1: Write failing answer service test**
 
 Create a fake artifact repository containing a Ferrari 360 lower-control-arm claim and assert the answer:
 
@@ -276,17 +287,17 @@ Create a fake artifact repository containing a Ferrari 360 lower-control-arm cla
 - cites the source unit locator
 - includes `artifact_first` in retrieval trace
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run python -m pytest tests/unit/test_workshop_artifact_answer.py -q`
 
 Expected: import failure.
 
-- [ ] **Step 3: Implement artifact answer service**
+- [x] **Step 3: Implement artifact answer service**
 
 The service should perform clarification gate checks before using an artifact, return `None` when no relevant artifact exists, and build `KnowledgeAnswer` with existing `EvidenceCitation` and `SourceLocator` types.
 
-- [ ] **Step 4: Add explicit request flag**
+- [x] **Step 4: Add explicit request flag**
 
 Extend `AskRouteRequest` with:
 
@@ -296,7 +307,7 @@ artifact_mode: Literal["off", "prefer"] = "off"
 
 In `/knowledge/ask/sync`, try artifact-first only when `artifact_mode == "prefer"`. If no artifact answer exists, continue through the existing retrieval path. Keep streaming behavior on raw retrieval until a later UI task adds streamed artifact events.
 
-- [ ] **Step 5: Verify answer tests pass**
+- [x] **Step 5: Verify answer tests pass**
 
 Run: `uv run python -m pytest tests/unit/test_workshop_artifact_answer.py tests/integration/test_workshop_api.py -q`
 
@@ -308,7 +319,7 @@ Expected: pass.
 - Modify: `apps/api/src/prescient_benchmark/cli.py`
 - Test: `tests/integration/test_workshop_manuals_cli.py`
 
-- [ ] **Step 1: Write failing CLI test**
+- [x] **Step 1: Write failing CLI test**
 
 Add a test that invokes:
 
@@ -319,13 +330,13 @@ extract-workshop-artifacts --data-root corpus/workshop_manuals --scope-id scope-
 
 For unit-level verification, monkeypatch repository connection and assert the command extracts observations and assembles artifacts from the existing JSON store.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run python -m pytest tests/integration/test_workshop_manuals_cli.py -q`
 
 Expected: fails because command does not exist.
 
-- [ ] **Step 3: Implement commands**
+- [x] **Step 3: Implement commands**
 
 Add:
 
@@ -337,7 +348,7 @@ def artifact_schema_init(database_url: str | None = typer.Option(None)) -> None:
 def extract_workshop_artifacts_command(data_root: Path, scope_id: str, database_url: str | None) -> None: ...
 ```
 
-- [ ] **Step 4: Verify CLI tests pass**
+- [x] **Step 4: Verify CLI tests pass**
 
 Run: `uv run python -m pytest tests/integration/test_workshop_manuals_cli.py -q`
 
@@ -348,7 +359,7 @@ Expected: pass.
 **Files:**
 - All files above.
 
-- [ ] **Step 1: Run focused tests**
+- [x] **Step 1: Run focused tests**
 
 Run:
 
@@ -366,12 +377,12 @@ uv run python -m pytest \
 
 Expected: all pass.
 
-- [ ] **Step 2: Run broader backend tests if focused tests pass**
+- [x] **Step 2: Run broader backend tests if focused tests pass**
 
 Run: `uv run python -m pytest tests/unit tests/integration/test_workshop_api.py tests/integration/test_workshop_manuals_cli.py -q`
 
 Expected: all selected tests pass.
 
-- [ ] **Step 3: Commit and push**
+- [x] **Step 3: Commit and push**
 
 Commit docs plan, code, tests, lockfile, and Beads updates. Push both the docs repo and main repo.
