@@ -47,6 +47,56 @@ Durable terminology mappings are a later step on the same surface. The first usa
 
 The retrieval behavior should be organized around a `vehicle_repair_v1` retrieval profile, not a `workshop_manuals_v1` source-type profile. The profile represents how vehicle repair knowledge should be searched and reranked across workshop manuals, parts catalogs, service bulletins, forum posts, personal notes, and future repair sources.
 
+## Decision Rationale
+
+### Human-in-the-loop terminology workbench
+
+The workbench exists because retrieval failures are often visible to a domain user before they are visible to the system. In the lower-control-arm example, the user can recognize that `LCA`, `wishbone`, `suspension arm`, and `lower arm` may refer to the same component. Capturing that judgment in the moment of failure is more reliable than trying to infer every synonym automatically after the fact.
+
+The decision also keeps terminology learning reviewable. A successful experiment can become durable knowledge only after a human sees the candidate pages it recovered and chooses the scope where that mapping is safe.
+
+### Retrieval preview before answer generation
+
+The preview endpoint is separate from answer generation because the user needs to debug retrieval independently of LLM synthesis. If the wrong pages are retrieved, changing the answer prompt or increasing model effort does not fix the root issue.
+
+Preview also reduces cost and noise while experimenting. The user can try terms, inspect candidate pages, and compare rank changes without repeatedly invoking the answer provider.
+
+### Shared retrieval primitives
+
+The workbench must use the same store provider, scope resolver, OpenSearch index, locator validation, and candidate identifiers as `/knowledge/ask`. This prevents a diagnostic-only path that works in the UI but does not improve real answers.
+
+The UI may select or constrain candidates, but the answer service remains responsible for support checking and citations. That preserves the KE-first contract that answers are grounded in cited evidence.
+
+### RetrievalProfile instead of source type
+
+`vehicle_repair_v1` is a retrieval profile rather than a workshop-manual profile because the retrieval behavior belongs to the knowledge task, not the container format. Vehicle repair questions may need manuals, service bulletins, parts diagrams, owner notes, forum posts, or vendor instructions. A source-type profile would make useful terminology and reranking rules artificially stop at PDFs.
+
+This also keeps the design generalizable. Later business use cases can define profiles for financial metrics, contract review, or operational procedures without changing the generic source model.
+
+### Layered terminology applicability
+
+Terminology is layered because some mappings are broadly true and others are only safe in a narrow context. `LCA` and `lower control arm` are broadly useful vehicle-repair terms; Ferrari bilingual terms may be brand-family behavior; a specific OCR quirk or table convention belongs to one source.
+
+The default save scope is conservative because over-broad mappings create invisible retrieval pollution. Promotion to broader layers should be deliberate and backed by observed evidence across that layer.
+
+### Deterministic torque reranking first
+
+Torque queries need transparent behavior because the answer is a safety-critical numeric claim. A deterministic reranker can expose why a page moved up: it contained `Nm`, a torque-table heading, component terms, and attachment terms. That is easier to inspect, test, and regress than an opaque learned reranker in the first dogfood slice.
+
+This does not rule out model-assisted expansion or reranking later. It sets a reliable baseline that can be evaluated before adding less deterministic behavior.
+
+### Local preview history before persistence
+
+Preview runs start local to the UI because most exploratory term trials are disposable. Persisting every trial would add storage, governance, and cleanup work before the user has proven which interactions are useful.
+
+Server persistence begins at meaningful commitment points: marking a run useful, answering from selected pages, or saving a mapping. Those events are strong signals for eval promotion and future terminology review.
+
+### Eval promotion as part of the loop
+
+Terminology work should feed evals because otherwise fixes remain anecdotal. The lower-control-arm case should become a regression that proves the profile and mappings recover pages 250 or 252 and support the 55 Nm and 60 Nm claims.
+
+The inverse path matters as much as promotion. When an eval fails, opening it in the same workbench gives the user the original question, expected evidence, and observed candidates in the tool they already use to diagnose retrieval.
+
 ## Retrieval Profiles And Terminology Layers
 
 `KnowledgeScope` answers which sources are available for a question. `RetrievalProfile` answers how that scope should be searched.
@@ -412,7 +462,21 @@ Manual verification:
 ## Rollout
 
 1. Implement retrieval preview behind the workshop API.
+
+   Why first: retrieval must be inspectable before the UI or persistence can be evaluated. This slice proves the backend can return candidate pages, matched terms, evidence flags, diagnostics, and stable candidate ids without invoking the answer provider.
+
 2. Add `vehicle_repair_v1` retrieval-profile configuration with deterministic torque reranking and layered terminology composition.
+
+   Why second: the preview endpoint is only useful if it can exercise the retrieval behavior we actually want to improve. This slice keeps repair-specific rules out of generic retrieval code, makes the Ferrari 360 torque case testable, and establishes the reusable profile boundary for future vehicle sources.
+
 3. Add the temporary term-trial UI.
+
+   Why third: once preview and profile behavior exist, the user can interact with the system in the garage workflow: add terms, compare candidates, inspect page thumbnails, and answer from selected pages. Keeping the first UI temporary avoids turning the initial slice into a terminology administration product.
+
 4. Add mapping persistence with applicability layers, auto-apply behavior, and applied-mapping provenance.
+
+   Why fourth: persistence should follow observed useful trials. By this point the UI will show which terms recover evidence, so saved mappings can include scope, source, originating question, evidence units, status, and provenance instead of becoming ungrounded dictionary entries.
+
 5. Add eval promotion and inverse eval investigation workflows after the workbench has been dogfooded.
+
+   Why fifth: eval cases should be created from real successful and failed investigations. Waiting until the workbench has been used avoids premature eval schema choices while still making regression coverage a required part of the feature before it is considered complete.
