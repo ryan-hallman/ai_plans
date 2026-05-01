@@ -25,7 +25,7 @@
 - Modify: `apps/api/src/prescient_benchmark/artifacts/models.py`
 - Test: `tests/unit/test_artifact_feedback.py`
 
-- [ ] **Step 1: Write failing feedback mapping tests**
+- [x] **Step 1: Write failing feedback mapping tests**
 
 Create tests asserting:
 
@@ -37,17 +37,17 @@ wrong_scope -> ArtifactTrustState.DISPUTED
 
 Also assert unsupported actions fail validation.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `uv run python -m pytest tests/unit/test_artifact_feedback.py -q`
 
 Expected: import failure.
 
-- [ ] **Step 3: Implement feedback mapping**
+- [x] **Step 3: Implement feedback mapping**
 
 Add `ArtifactClaimFeedbackAction` enum and `build_system_owner_validation_event(...)`.
 
-- [ ] **Step 4: Verify feedback tests pass**
+- [x] **Step 4: Verify feedback tests pass**
 
 Run: `uv run python -m pytest tests/unit/test_artifact_feedback.py -q`
 
@@ -61,7 +61,7 @@ Expected: pass.
 - Test: `tests/unit/test_workshop_artifact_answer.py`
 - Test: `tests/integration/test_workshop_api.py`
 
-- [ ] **Step 1: Write failing route tests**
+- [x] **Step 1: Write failing route tests**
 
 Add API tests for:
 
@@ -69,13 +69,13 @@ Add API tests for:
 - `wrong_scope` returns a validation event with `trust_state == "disputed"`
 - artifact-first answers include `artifact_id` and `claim_id` in retrieval diagnostics so clients can send feedback without guessing IDs
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `uv run python -m pytest tests/unit/test_workshop_artifact_answer.py tests/integration/test_workshop_api.py -q`
 
 Expected: fail for missing feedback route/diagnostics.
 
-- [ ] **Step 3: Implement route and diagnostics**
+- [x] **Step 3: Implement route and diagnostics**
 
 Add `POST /knowledge/artifacts/{artifact_id}/claims/{claim_id}/feedback` with request body `{ "action": "...", "notes": "..." }`.
 
@@ -90,7 +90,7 @@ Add artifact metadata to `KnowledgeAnswer.retrieval_diagnostics` for artifact-fi
 }
 ```
 
-- [ ] **Step 4: Verify route tests pass**
+- [x] **Step 4: Verify route tests pass**
 
 Run: `uv run python -m pytest tests/unit/test_workshop_artifact_answer.py tests/integration/test_workshop_api.py -q`
 
@@ -101,7 +101,7 @@ Expected: pass.
 **Files:**
 - All files above.
 
-- [ ] **Step 1: Run focused tests**
+- [x] **Step 1: Run focused tests**
 
 Run:
 
@@ -116,12 +116,12 @@ uv run python -m pytest \
 
 Expected: pass.
 
-- [ ] **Step 2: Run broader backend slice**
+- [x] **Step 2: Run broader backend slice**
 
 Run: `uv run python -m pytest tests/unit tests/integration/test_workshop_api.py tests/integration/test_workshop_manuals_cli.py -q`
 
 Expected: pass.
 
-- [ ] **Step 3: Commit and push**
+- [x] **Step 3: Commit and push**
 
 Commit the plan, code, tests, and Beads update. Push docs and main repo.
