@@ -32,8 +32,9 @@ The automotive UI is the first dogfood surface because it gives rapid feedback w
 1. Terminology learning is human-reviewed. The system may suggest mappings, but approved mappings must be explicit.
 2. Temporary experimentation comes before persistence. The user should be able to try terms without changing global retrieval behavior.
 3. Mapping scope must be narrow by default. A term such as `wishbone` can mean different things across domains; the safe default is the current manual scope.
-4. The normal answer path and the workbench must share retrieval primitives. The workbench should not become a separate search system.
-5. Retrieval diagnostics should be visible enough to explain why a candidate moved up or down.
+4. Terminology should be reusable across vehicle repair use cases when it is safe, but source-specific quirks should stay source-specific.
+5. The normal answer path and the workbench must share retrieval primitives. The workbench should not become a separate search system.
+6. Retrieval diagnostics should be visible enough to explain why a candidate moved up or down.
 
 ## Chosen Approach
 
@@ -43,6 +44,52 @@ Build the feature in two layers:
 2. A UI workbench panel that lets the user edit term chips, rerun retrieval, compare runs, and answer from a selected candidate set.
 
 Durable terminology mappings are a later step on the same surface. The first usable version should optimize for fast manual experimentation rather than dictionary administration.
+
+The retrieval behavior should be organized around a `vehicle_repair_v1` retrieval profile, not a `workshop_manuals_v1` source-type profile. The profile represents how vehicle repair knowledge should be searched and reranked across workshop manuals, parts catalogs, service bulletins, forum posts, personal notes, and future repair sources.
+
+## Retrieval Profiles And Terminology Layers
+
+`KnowledgeScope` answers which sources are available for a question. `RetrievalProfile` answers how that scope should be searched.
+
+For the current Ferrari 360 dogfood scope, retrieval should compose these layers:
+
+1. `vehicle_repair_v1` - shared vehicle repair behavior and terminology.
+2. `ferrari_v1` - Ferrari-specific vocabulary and multilingual repair terms.
+3. `ferrari_360_v1` - 360-specific terminology, applicability, and source structure.
+4. source-specific mappings - manual OCR quirks, page/table conventions, or forum/source vocabulary.
+5. temporary UI terms - unsaved terms applied only to the current preview run.
+
+Examples:
+
+| Layer | Example Mapping | Why |
+| --- | --- | --- |
+| `vehicle_repair_v1` | `LCA`, `wishbone`, `lower control arm`, `suspension arm` | Broad repair vocabulary useful across many vehicles. |
+| `ferrari_v1` | `telaio` = `chassis` or `frame` | Ferrari manuals mix Italian and English terminology. |
+| `ferrari_360_v1` | `Challenge Stradale` = `CS` | 360-family variant terminology. |
+| source-specific | `p250` contains the F 1.02 torque table | Specific to one manual and should not generalize. |
+
+The default save location for a new mapping should be conservative: `ferrari_360_v1` or source-specific. The UI may allow promotion to `vehicle_repair_v1` or `ferrari_v1` after the user decides the mapping is broadly safe.
+
+Approved mappings should auto-apply within their applicability layer. Auto-application is acceptable only if preview and answer responses expose mapping provenance so the user can see which mappings affected retrieval.
+
+Example provenance:
+
+```json
+{
+  "applied_mappings": [
+    {
+      "alias": "LCA",
+      "canonical_term": "lower control arm",
+      "layer": "vehicle_repair_v1"
+    },
+    {
+      "alias": "telaio",
+      "canonical_term": "chassis",
+      "layer": "ferrari_v1"
+    }
+  ]
+}
+```
 
 ## Rejected Alternatives
 
@@ -71,7 +118,8 @@ When the user wants to debug retrieval, they open a `Try terminology` panel from
 The panel shows:
 
 - the original question
-- detected or manually editable terms
+- detected terms from simple deterministic extraction
+- manually editable term chips
 - current candidate pages
 - retrieval diagnostics
 
@@ -123,7 +171,8 @@ The mapping should be saved as proposed or approved terminology with provenance:
 
 - canonical term
 - aliases
-- scope id
+- applicability layer
+- scope id when the mapping is scope-specific
 - source ids
 - optional intent tags
 - evidence unit ids that motivated the mapping
@@ -136,6 +185,7 @@ Example:
 ```text
 canonical_term: suspension arm
 aliases: lower control arm, LCA, wishbone, lower arm, leva inferiore
+applicability_layer: ferrari_360_v1
 scope_id: scope-ferrari-360-modena
 source_ids: source-ferrari-360-wsm
 intent_tags: torque_spec, procedure
@@ -144,6 +194,18 @@ status: approved
 ```
 
 The first implementation may defer persistence, but the UI and API should be shaped so persistence can be added without redesigning the workflow.
+
+The save UI should require an applicability choice:
+
+```text
+Save mapping scope:
+[ ] Vehicle repair generally
+[ ] Ferrari vehicles
+[x] Ferrari 360 only
+[ ] This manual/source only
+```
+
+The default should be `Ferrari 360 only` or `This manual/source only`, not global vehicle repair.
 
 ## API Design
 
@@ -191,6 +253,13 @@ Response:
       "evidence_flags": ["torque_table", "numeric_torque"]
     }
   ],
+  "applied_mappings": [
+    {
+      "alias": "lower control arm",
+      "canonical_term": "suspension arm",
+      "layer": "vehicle_repair_v1"
+    }
+  ],
   "diagnostics": {
     "raw_candidate_count": 30,
     "returned_candidate_count": 8,
@@ -202,23 +271,34 @@ Response:
 
 The endpoint should use the same store, scope resolver, OpenSearch index, and locator validation as `/knowledge/ask`.
 
+`intent` should be a closed enum for the active retrieval profile. For `vehicle_repair_v1`, v1 intents are:
+
+- `torque_spec`
+- `procedure`
+- `spec_table`
+
+Future domains can define their own profile-specific intents, such as `metric_value`, `definition`, or `clause_lookup`, without changing the preview endpoint shape.
+
 ### Answer From Preview
 
 The existing answer route already accepts `candidate_unit_ids`. The UI should use that path for `Answer from these pages`.
 
 This avoids introducing a parallel answer contract. The workbench selects candidates; the answer service determines whether they support an answer.
 
+The web UI should reuse the existing streaming `/knowledge/ask` route for this action. The non-streaming `/knowledge/ask/sync` route remains for MCP, tests, and eval harnesses.
+
 ## Retrieval Design
 
 The first workbench version should use a deterministic retrieval strategy:
 
 1. Run the original question.
-2. Run an expanded query composed of the original question plus extra terms.
-3. Merge and deduplicate a larger candidate pool.
-4. Apply transparent reranking heuristics.
-5. Return the top preview candidates with diagnostic metadata.
+2. Compose approved mappings from `vehicle_repair_v1`, make/model overlays, source-specific mappings, and any temporary UI terms.
+3. Run an expanded query composed of the original question plus composed terms.
+4. Merge and deduplicate a larger candidate pool.
+5. Apply transparent reranking heuristics.
+6. Return the top preview candidates with diagnostic metadata.
 
-For torque-intent queries, reranking should boost candidates that contain:
+Rerank rules should live in retrieval-profile configuration, not hardcoded in generic retrieval code. For `vehicle_repair_v1` torque-intent queries, reranking should boost candidates that contain:
 
 - `TIGHTENING TORQUES`
 - `COPPIE DI SERRAGGIO`
@@ -230,6 +310,8 @@ It should penalize pages that only contain generic phrases such as `prescribed t
 
 The lower-control-arm query is the first regression case. With extra terms `lower arm`, `suspension arm`, and `Nm`, pages 250 or 252 should appear in the top preview candidates.
 
+Phase 1 multilingual handling is explicitly limited to English plus Italian terms observed in the Ferrari 360 manuals. Later profiles should carry their own language metadata, analyzers, and terminology layers instead of assuming every corpus is bilingual in the same way.
+
 ## UI Design
 
 Add a workbench panel to the existing app UI, not a separate admin page.
@@ -237,6 +319,7 @@ Add a workbench panel to the existing app UI, not a separate admin page.
 Recommended placement:
 
 - collapsed `Try terminology` control near insufficient-evidence answers and candidate-only evidence
+- `Try terminology` affordance from the `Wrong` feedback path for answered-but-wrong cases
 - expandable panel in the existing chat pane or right-side evidence area
 - term chips with add/remove controls
 - `Preview retrieval` action
@@ -246,7 +329,11 @@ Recommended placement:
 
 The UI should be utilitarian and dense. It should feel like a diagnostic tool for the garage, not a marketing surface.
 
+Candidate page thumbnails should use `/knowledge/citation-page?rendition=thumb` for inline previews. Full-resolution page images remain available on demand.
+
 The first version does not need mapping persistence. It should make the retrieval failure visible and let the user recover a better candidate set.
+
+Preview run history is local to the UI in Phase 1. Server-side run persistence begins when the user marks a preview run useful, answers from a selected run, or saves a terminology mapping. This avoids storing every exploratory query while still preserving useful dogfood evidence for eval promotion.
 
 ## Data Model Direction
 
@@ -255,6 +342,8 @@ When persistence is added, introduce a terminology mapping model that is generic
 - id
 - canonical term
 - aliases
+- applicability layer
+- retrieval profile id
 - scope id
 - source ids
 - source kind or domain tag
@@ -264,6 +353,10 @@ When persistence is added, introduce a terminology mapping model that is generic
 - provenance: created by, created at, originating question, originating answer id
 
 Mappings should be applied at query time, not baked into the source text. This keeps approved terminology inspectable, reversible, and scoped.
+
+Approved mappings auto-apply only inside their applicability layer. The answer and preview contracts should return `applied_mappings` so users and eval records can explain why retrieval changed.
+
+To keep query expansion bounded, each retrieval profile should define caps for automatically applied mappings. Phase 1 should cap applied mappings by intent and term match; disabled or rejected mappings must never be applied.
 
 ## Eval And Feedback
 
@@ -277,6 +370,8 @@ Successful terminology trials should be promotable into eval cases. For the lowe
 
 This turns dogfood failures into retrieval-quality tests and prevents terminology fixes from becoming untracked one-off patches.
 
+The workflow is bidirectional. Failing eval cases should also open in the workbench with their original question, expected evidence, and observed candidates so retrieval failures can be investigated through the same UI used during dogfooding.
+
 ## Non-Goals
 
 - Do not build a full terminology administration product in the first slice.
@@ -284,6 +379,7 @@ This turns dogfood failures into retrieval-quality tests and prevents terminolog
 - Do not make terminology mappings global by default.
 - Do not bypass citation enforcement or answer support checks.
 - Do not introduce car-specific source entities into the generic KE spine.
+- Do not treat source type as the retrieval-profile boundary. A vehicle repair profile may include workshop manuals, parts catalogs, service bulletins, forum posts, notes, and other source types.
 
 ## Testing Strategy
 
@@ -295,13 +391,16 @@ Backend tests:
 - torque-intent reranking boosts numeric torque table pages
 - preview respects scope filtering
 - preview exposes matched terms and evidence flags
+- preview exposes applied mapping provenance
+- approved mappings auto-apply only within their configured applicability layer
 
 Frontend tests:
 
 - term chips can be added and removed
 - preview runs are displayed with candidates
 - selected run can call the existing answer route with candidate unit ids
-- insufficient-evidence answers expose the workbench entry point
+- insufficient-evidence answers and wrong-answer feedback expose the workbench entry point
+- inline candidate previews request thumb renditions
 
 Manual verification:
 
@@ -312,8 +411,8 @@ Manual verification:
 
 ## Rollout
 
-1. Implement retrieval preview and deterministic reranking behind the workshop API.
-2. Add the temporary term-trial UI.
-3. Use real garage questions to identify the smallest useful set of diagnostics.
-4. Add persistence only after the temporary workflow proves useful.
-5. Promote successful trials into eval cases before expanding the mapping system.
+1. Implement retrieval preview behind the workshop API.
+2. Add `vehicle_repair_v1` retrieval-profile configuration with deterministic torque reranking and layered terminology composition.
+3. Add the temporary term-trial UI.
+4. Add mapping persistence with applicability layers, auto-apply behavior, and applied-mapping provenance.
+5. Add eval promotion and inverse eval investigation workflows after the workbench has been dogfooded.
