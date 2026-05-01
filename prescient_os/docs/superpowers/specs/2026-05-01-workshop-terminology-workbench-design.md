@@ -79,6 +79,8 @@ Terminology is layered because some mappings are broadly true and others are onl
 
 The default save scope is conservative because over-broad mappings create invisible retrieval pollution. Promotion to broader layers should be deliberate and backed by observed evidence across that layer.
 
+The layer model should be DAG-capable, not limited to a single inheritance chain. The Ferrari 360 dogfood scope composes like a simple chain because vehicle repair, Ferrari, and 360-specific knowledge nest cleanly. Business, legal, and research corpora will compose orthogonal layers such as domain, jurisdiction, organization, project, and source at the same time. The v1 workshop implementation may use a chain-shaped composition, but the schema should store a set of applicable layers so later domains do not require a terminology migration.
+
 ### Deterministic torque reranking first
 
 Torque queries need transparent behavior because the answer is a safety-critical numeric claim. A deterministic reranker can expose why a page moved up: it contained `Nm`, a torque-table heading, component terms, and attachment terms. That is easier to inspect, test, and regress than an opaque learned reranker in the first dogfood slice.
@@ -103,24 +105,35 @@ The inverse path matters as much as promotion. When an eval fails, opening it in
 
 For the current Ferrari 360 dogfood scope, retrieval should compose these layers:
 
-1. `vehicle_repair_v1` - shared vehicle repair behavior and terminology.
-2. `ferrari_v1` - Ferrari-specific vocabulary and multilingual repair terms.
-3. `ferrari_360_v1` - 360-specific terminology, applicability, and source structure.
-4. source-specific mappings - manual OCR quirks, page/table conventions, or forum/source vocabulary.
-5. temporary UI terms - unsaved terms applied only to the current preview run.
+1. `domain:vehicle_repair:v1` - shared vehicle repair behavior and terminology.
+2. `org:ferrari:v1` - Ferrari-specific vocabulary and multilingual repair terms.
+3. `product:ferrari_360:v1` - 360-specific terminology, applicability, and source structure.
+4. `source:<source_id>:v1` mappings - manual OCR quirks, page/table conventions, or forum/source vocabulary.
+5. `temporary-ui` terms - unsaved terms applied only to the current preview run.
 
 Examples:
 
 | Layer | Example Mapping | Why |
 | --- | --- | --- |
-| `vehicle_repair_v1` | `LCA`, `wishbone`, `lower control arm`, `suspension arm` | Broad repair vocabulary useful across many vehicles. |
-| `ferrari_v1` | `telaio` = `chassis` or `frame` | Ferrari manuals mix Italian and English terminology. |
-| `ferrari_360_v1` | `Challenge Stradale` = `CS` | 360-family variant terminology. |
-| source-specific | `p250` contains the F 1.02 torque table | Specific to one manual and should not generalize. |
+| `domain:vehicle_repair:v1` | `LCA`, `wishbone`, `lower control arm`, `suspension arm` | Broad repair vocabulary useful across many vehicles. |
+| `org:ferrari:v1` | `telaio` = `chassis` or `frame` | Ferrari manuals mix Italian and English terminology. |
+| `product:ferrari_360:v1` | `Challenge Stradale` = `CS` | 360-family variant terminology. |
+| `source:source-ferrari-360-wsm:v1` | `p250` contains the F 1.02 torque table | Specific to one manual and should not generalize. |
 
-The default save location for a new mapping should be conservative: `ferrari_360_v1` or source-specific. The UI may allow promotion to `vehicle_repair_v1` or `ferrari_v1` after the user decides the mapping is broadly safe.
+Layer ids should carry a stable kind prefix and also store the kind as a first-class field. The prefix makes ids readable in logs and fixtures; the explicit `layer_kind` field keeps UI grouping and conflict resolution from depending on string parsing.
 
-Approved mappings should auto-apply within their applicability layer. Auto-application is acceptable only if preview and answer responses expose mapping provenance so the user can see which mappings affected retrieval.
+Example layer shape:
+
+```text
+TerminologyLayer:
+  layer_id: domain:vehicle_repair:v1
+  layer_kind: domain
+  display_name: Vehicle repair
+```
+
+The default save location for a new mapping should be conservative: `product:ferrari_360:v1` or `source:<source_id>:v1`. The UI may allow promotion to `domain:vehicle_repair:v1` or `org:ferrari:v1` after the user decides the mapping is broadly safe.
+
+Approved mappings should auto-apply when the active retrieval context intersects their applicability layers. Auto-application is acceptable only if preview and answer responses expose mapping provenance so the user can see which mappings affected retrieval.
 
 Example provenance:
 
@@ -130,16 +143,39 @@ Example provenance:
     {
       "alias": "LCA",
       "canonical_term": "lower control arm",
-      "layer": "vehicle_repair_v1"
+      "applicability_layers": ["domain:vehicle_repair:v1"]
     },
     {
       "alias": "telaio",
       "canonical_term": "chassis",
-      "layer": "ferrari_v1"
+      "applicability_layers": ["org:ferrari:v1"]
     }
   ]
 }
 ```
+
+Example retrieval profile shape:
+
+```text
+RetrievalProfile:
+  profile_id: vehicle_repair_v1
+  intents: torque_spec, procedure, spec_table
+  layer_order:
+    - domain:vehicle_repair:v1
+    - org:ferrari:v1
+    - product:ferrari_360:v1
+    - source:<source_id>:v1
+    - temporary-ui
+  rerank_rules:
+    torque_spec:
+      boosts: TIGHTENING TORQUES, COPPIE DI SERRAGGIO, Nm, component terms, attachment terms
+      penalties: prescribed torque without nearby numeric torque
+  applied_mapping_caps:
+    mappings_per_query: 8
+    aliases_per_canonical_term: 3
+```
+
+The v1 model may keep retrieval profile configuration and terminology lookup together for simplicity. That boundary is not load-bearing: later, terminology dictionaries may become standalone resources composed by profile, layer, corpus, or organization when multiple domains reuse the same dictionary.
 
 ## Rejected Alternatives
 
@@ -172,6 +208,8 @@ The panel shows:
 - manually editable term chips
 - current candidate pages
 - retrieval diagnostics
+
+Phase 1 deterministic extraction should use tokenization, stop-word removal, profile seed-term matching, acronym preservation, unit preservation such as `Nm`, and one-to-three-word noun-like n-grams from the question. It should not call an LLM or persist suggested terms.
 
 For the lower-control-arm query, the panel should support terms such as:
 
@@ -213,6 +251,8 @@ The user can choose a preview run and ask the existing answer path to answer fro
 
 The answer should still cite only the pages it uses. If the selected candidates are weak, the answer provider should still return insufficient evidence.
 
+Workbench answer-from runs should honor the existing streaming cancel semantics. Starting a new normal answer, starting a different answer-from run, or leaving the page should abort the in-flight stream through the existing `AbortController` path.
+
 ### 5. Save Mapping Later
 
 After a successful term trial, the UI can offer `Save terminology mapping`.
@@ -221,7 +261,7 @@ The mapping should be saved as proposed or approved terminology with provenance:
 
 - canonical term
 - aliases
-- applicability layer
+- applicability layers
 - scope id when the mapping is scope-specific
 - source ids
 - optional intent tags
@@ -235,7 +275,7 @@ Example:
 ```text
 canonical_term: suspension arm
 aliases: lower control arm, LCA, wishbone, lower arm, leva inferiore
-applicability_layer: ferrari_360_v1
+applicability_layers: [product:ferrari_360:v1]
 scope_id: scope-ferrari-360-modena
 source_ids: source-ferrari-360-wsm
 intent_tags: torque_spec, procedure
@@ -307,7 +347,7 @@ Response:
     {
       "alias": "lower control arm",
       "canonical_term": "suspension arm",
-      "layer": "vehicle_repair_v1"
+      "applicability_layers": ["domain:vehicle_repair:v1"]
     }
   ],
   "diagnostics": {
@@ -342,7 +382,7 @@ The web UI should reuse the existing streaming `/knowledge/ask` route for this a
 The first workbench version should use a deterministic retrieval strategy:
 
 1. Run the original question.
-2. Compose approved mappings from `vehicle_repair_v1`, make/model overlays, source-specific mappings, and any temporary UI terms.
+2. Compose approved mappings from the active terminology layer set, including `domain:vehicle_repair:v1`, make/model overlays, source-specific mappings, and any temporary UI terms.
 3. Run an expanded query composed of the original question plus composed terms.
 4. Merge and deduplicate a larger candidate pool.
 5. Apply transparent reranking heuristics.
@@ -361,6 +401,8 @@ It should penalize pages that only contain generic phrases such as `prescribed t
 The lower-control-arm query is the first regression case. With extra terms `lower arm`, `suspension arm`, and `Nm`, pages 250 or 252 should appear in the top preview candidates.
 
 Phase 1 multilingual handling is explicitly limited to English plus Italian terms observed in the Ferrari 360 manuals. Later profiles should carry their own language metadata, analyzers, and terminology layers instead of assuming every corpus is bilingual in the same way.
+
+If the normal answer path returns `NEEDS_CLARIFICATION`, the default workbench flow should preserve that ambiguity instead of silently choosing a vehicle. The UI should ask the user to select one of the candidate variants before running a scoped preview; an explicit all-variants preview may run against the current family scope for diagnosis, but answering from selected pages should still pass scoped candidate unit ids through the normal support-checking path.
 
 ## UI Design
 
@@ -392,7 +434,8 @@ When persistence is added, introduce a terminology mapping model that is generic
 - id
 - canonical term
 - aliases
-- applicability layer
+- applicability layers
+- layer kind metadata
 - retrieval profile id
 - scope id
 - source ids
@@ -404,9 +447,9 @@ When persistence is added, introduce a terminology mapping model that is generic
 
 Mappings should be applied at query time, not baked into the source text. This keeps approved terminology inspectable, reversible, and scoped.
 
-Approved mappings auto-apply only inside their applicability layer. The answer and preview contracts should return `applied_mappings` so users and eval records can explain why retrieval changed.
+Approved mappings auto-apply only when the active retrieval context intersects at least one configured applicability layer. The answer and preview contracts should return `applied_mappings` so users and eval records can explain why retrieval changed.
 
-To keep query expansion bounded, each retrieval profile should define caps for automatically applied mappings. Phase 1 should cap applied mappings by intent and term match; disabled or rejected mappings must never be applied.
+To keep query expansion bounded, each retrieval profile should define caps for automatically applied mappings. Phase 1 should apply at most 8 approved mappings per query and at most 3 aliases for any one canonical term, after filtering by intent and term match. Disabled or rejected mappings must never be applied.
 
 ## Eval And Feedback
 
@@ -442,14 +485,17 @@ Backend tests:
 - preview respects scope filtering
 - preview exposes matched terms and evidence flags
 - preview exposes applied mapping provenance
-- approved mappings auto-apply only within their configured applicability layer
+- approved mappings auto-apply only within their configured applicability layers
+- mapping caps limit auto-application to 8 mappings per query and 3 aliases per canonical term
 
 Frontend tests:
 
 - term chips can be added and removed
 - preview runs are displayed with candidates
 - selected run can call the existing answer route with candidate unit ids
+- answer-from-selected runs use the existing AbortController cancel path
 - insufficient-evidence answers and wrong-answer feedback expose the workbench entry point
+- NEEDS_CLARIFICATION entry points require the user to choose a resolved scope before a scoped preview
 - inline candidate previews request thumb renditions
 
 Manual verification:
