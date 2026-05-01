@@ -45,6 +45,7 @@ This design does not:
 - build a full multi-user abuse-resistance system in the first slice
 - choose a permanent external ticketing system
 - solve every artifact type across every domain in one implementation plan
+- build `procedure_artifact`, `vehicle_record`, or broad `company_context` artifacts in v1
 
 The first implementation should stay narrow enough to validate the model.
 
@@ -65,6 +66,10 @@ Workshop manuals, service bulletins, and approved policies deserve higher defaul
 ### Build only vehicle-specific artifacts
 
 Vehicle-specific artifacts are necessary for answering Ferrari 360 questions, but many mappings and claims generalize across platforms. The artifact model should support both scoped vehicle artifacts and reusable domain concepts such as component aliases, procedure types, and spec claim patterns. This avoids trapping the workshop slice inside one make/model while still allowing vehicle-specific differences.
+
+### Keep artifacts in file-backed JSON for dogfood
+
+File-backed JSON was acceptable for immutable workshop ingest outputs because those files were produced by batch jobs and read by retrieval. Artifacts are different: they mutate, carry event history, point to many sources, get disputed, and need current-state projections. JSON files would make concurrency, versioning, and provenance queries harder immediately. V1 should commit to Postgres for observations, artifacts, artifact claims, validation events, and current projections.
 
 ## Core Principle
 
@@ -138,17 +143,44 @@ For business contexts, analogous observations include:
 - strategic claims
 - timeline events
 
+## V1 Extraction Technique
+
+Extraction is the load-bearing primitive, so the v1 slice should be deliberately narrow and measurable.
+
+For Ferrari 360 torque/spec extraction, use a deterministic-first pipeline:
+
+1. Read already-ingested manual units and page locators.
+2. Extract candidate table rows and nearby section/table headers from PDF text and structured page metadata.
+3. Parse numeric values, units, component terms, fastener terms, and applicability terms with explicit rules.
+4. Use the terminology profile to normalize aliases such as `LCA`, `wishbone`, `lower arm`, and `lower control arm`.
+5. Use an LLM only as a bounded classifier/normalizer when deterministic parsing produces candidates, not as the sole source of a value.
+6. Emit observations with provenance to exact source units/pages and extraction-run metadata.
+
+Initial extraction confidence should be explainable rather than opaque. It should be derived from visible factors:
+
+- numeric value and unit were parsed cleanly
+- candidate came from a table or labeled spec section
+- nearby headers support the component/procedure scope
+- terminology normalization has a known mapping
+- multiple source units agree on value and scope
+- contradictory values exist for the same candidate claim
+- required applicability fields are missing
+
+When the same candidate fact appears with different values or scopes, the extractor should emit separate observations and mark them as conflicting candidates. The artifact assembler should not average or silently pick a value. It should either choose the highest-supported claim with a visible dispute note or create a disputed draft claim for validation.
+
+Extraction must be re-runnable. Each run should have an extraction-run id, parser/profile version, input source snapshot, and output observation ids so improved OCR, better table extraction, new terminology mappings, or new manual editions can produce new observations without overwriting the old ones.
+
 ## Artifact Layer
 
 Artifacts are maintained current-state records assembled from observations.
 
-V1 workshop artifact targets:
+Near-term workshop artifact types:
 
 - `component_spec_artifact`
 - `procedure_artifact`
 - `vehicle_record`
 
-The first implementation should focus on `component_spec_artifact`, especially torque/spec claims for Ferrari 360 suspension and adjacent service areas.
+The first implementation should only build `component_spec_artifact`, especially torque/spec claims for Ferrari 360 suspension and adjacent service areas. Procedure and vehicle-record artifacts are Phase 2 because procedure extraction is substantially harder than extracting structured torque/spec values.
 
 Example artifact:
 
@@ -165,7 +197,7 @@ claims:
     claim_type: torque_spec
     value: 55
     unit: Nm
-    trust_state: pending_validation
+    trust_state: extracted
     source_authority: authoritative_reference
     extraction_confidence: 0.82
     provenance:
@@ -182,24 +214,58 @@ related_procedures:
   - front_suspension_removal
 ```
 
-Artifacts may include pending claims. They do not need to be perfect before they become useful, but answer surfaces must expose trust state clearly.
+Artifacts may include extracted, not-yet-validated claims. They do not need to be perfect before they become useful, but answer surfaces must expose trust state clearly.
+
+Terminology workbench mappings and artifact aliases should be one system, not two. The workbench should create scoped alias claims, and the artifact assembler should project those aliases into relevant artifacts. Artifact-local aliases may still be displayed for convenience, but the durable source of truth is the scoped terminology/alias claim so `vehicle_repair_v1`, `ferrari_v1`, `ferrari_360_v1`, and source-specific mappings do not drift from artifact records.
+
+## Storage And Versioning
+
+V1 should use Postgres for mutable artifact data.
+
+Required storage concepts:
+
+- observations, keyed by extraction run and source provenance
+- artifacts, keyed by artifact id/type/scope
+- artifact claims, keyed by artifact and claim id
+- artifact aliases, projected from scoped terminology mappings
+- validation events, keyed by user/validator profile and claim/artifact
+- artifact events, stored append-only
+- current artifact projections for fast answer-time lookup
+
+`ArtifactVersion` should be minimal but explicit. V1 does not need a complex branching version model; it needs an append-only event log plus a current projection:
+
+```text
+artifact_event -> rebuild current artifact projection
+```
+
+Examples of artifact events:
+
+- `artifact_created`
+- `claim_added`
+- `claim_validated`
+- `claim_disputed`
+- `claim_corrected`
+- `claim_superseded`
+- `alias_added`
+- `alias_removed`
+
+Every current claim should point back to the events and observations that produced it. This lets evals pin expected behavior to a known artifact version and lets a user inspect what the system used to believe before a correction.
 
 ## Artifact Trust Lifecycle
 
-Artifacts and individual claims should support a progressive trust lifecycle:
+Artifacts and individual claims should support a progressive trust lifecycle. V1 should implement only three answer-relevant states:
 
 ```text
-extracted -> pending_validation -> user_validated -> disputed -> corrected/superseded
+extracted -> validated -> disputed
 ```
 
 Definitions:
 
-- `extracted`: created by an extraction process, not yet used as a preferred answer surface unless no better artifact exists
-- `pending_validation`: usable in answers with a visible trust label
-- `user_validated`: validated by a user with sufficient validator authority for the scope
+- `extracted`: created by an extraction process and usable in answers with a visible not-validated trust label when no validated claim exists
+- `validated`: validated by a user with sufficient validator authority for the scope
 - `disputed`: challenged by feedback or conflicting evidence
-- `corrected`: replaced with a revised claim or artifact version
-- `superseded`: no longer current because a newer or more authoritative artifact/claim replaced it
+
+`corrected` and `superseded` are event types in v1, not separate current trust states. A correction creates a new current claim version and records the prior claim in history. Phase 2 may add richer states such as `pending_validation`, `needs_review`, or `superseded_current_source`, but those should wait until real usage demands them.
 
 The lifecycle should apply at claim level first. Whole-artifact trust can be derived from claim states, but a single disputed claim should not necessarily invalidate the whole artifact.
 
@@ -207,7 +273,7 @@ The lifecycle should apply at claim level first. Whole-artifact trust can be der
 
 User feedback must be weighted. This is necessary to prevent accidental or intentional poisoning as the system moves beyond a sole-user dogfood setup.
 
-Initial validator authority levels:
+The long-term validator authority model has multiple levels:
 
 | Level | Meaning |
 | --- | --- |
@@ -216,6 +282,8 @@ Initial validator authority levels:
 | `validated_user` | earned through accepted feedback history |
 | `standard_user` | default user feedback creates proposals/disputes |
 | `low_trust` | feedback requires review and cannot mutate canonical artifacts |
+
+V1 should implement only `system_owner` and explicit "not implemented" guards for the other levels. Ryan is the configured `system_owner` for the dogfood vehicle-repair scope. This keeps the schema compatible with the future trust model without paying the complexity cost of unused multi-user authority.
 
 Authority must be scoped. A user can be authoritative for `vehicle_repair:ferrari_360` without being authoritative for legal docs, finance policy, or another vehicle platform.
 
@@ -231,18 +299,18 @@ Promotion and demotion of validator authority should be policy-driven:
 
 Question answering should be artifact-first:
 
-1. Use an approved or user-validated primary artifact when available.
-2. Use pending artifacts when no validated artifact exists, but label the answer as extracted/not validated.
-3. Use clustered observations when no artifact exists.
-4. Fall back to raw source retrieval when extraction/artifacts do not cover the question.
-5. Ask for clarification when entity, vehicle, variant, year, or scope materially changes the answer.
+1. Ask for clarification when entity, vehicle, variant, year, or scope materially changes the answer.
+2. Use a validated primary artifact claim when available.
+3. Use extracted artifact claims when no validated claim exists, but label the answer as extracted/not validated.
+4. If observations exist but no artifact exists, present a draft artifact candidate or fall back to raw retrieval; do not introduce separate clustering behavior in v1.
+5. Fall back to raw source retrieval when extraction/artifacts do not cover the question.
 
 Example answer for a workshop question:
 
 ```text
 The current extracted spec for the Ferrari 360 Modena lower control arm to chassis is 55 Nm.
 
-Trust: extracted from an authoritative reference, pending user validation.
+Trust: extracted from an authoritative reference, not yet user-validated.
 Sources: Ferrari 360 Workshop Manual p250 and front suspension removal p266.
 
 Note: the evidence appears in the suspension torque table and the front suspension removal section. Confirm whether you mean the front or rear lower arm if that distinction matters.
@@ -267,6 +335,8 @@ Broad-query policy:
 - If only raw sources match, answer from raw retrieval with a lower trust label and create an opportunity to compile an artifact.
 - If a user validates or corrects the answer, feed that event back into the artifact lifecycle instead of treating it as ephemeral chat feedback.
 
+Broad `company_context` and product-direction artifacts are Phase 2. They use the same artifact/version/event model, but they are living strategic artifacts rather than stable component-spec artifacts. V1 should keep the broad-query policy in the design while implementing the tractable workshop component-spec slice first.
+
 ## Feedback Triage Loop
 
 Normal usage should become the validation workflow. The user should be able to mark an answer or claim wrong and explain why in natural language.
@@ -290,14 +360,20 @@ A triage agent should classify feedback into one or more outcomes:
 
 The triage agent may propose artifact updates, observation updates, eval cases, or issue drafts. It should not silently overwrite high-trust claims unless validator authority and policy permit it.
 
+Triage outcomes should route to different sinks:
+
+- claim, evidence, scope, source-contradiction, and manual-review outcomes mutate artifact/observation state or create review events
+- extraction and retrieval gaps should seed eval cases when they describe a reproducible answer failure
+- only `engineering_ticket` should create an `IssueDraft`
+
 ## Issue Sink Boundary
 
 Beads is acceptable for local dogfood but must not become product architecture.
 
-Use a generic `IssueSink` port:
+Use a generic `IssueSink` port only for engineering tickets:
 
 ```text
-feedback -> triage_agent -> IssueDraft -> IssueSink
+feedback -> triage_agent -> engineering_ticket -> IssueDraft -> IssueSink
 ```
 
 Implementations:
@@ -316,9 +392,36 @@ The domain should emit an `IssueDraft` with structured fields:
 - source ids and page/message ids
 - suspected failure category
 - reproduction steps
-- eval-case seed when relevant
 
 No domain logic should depend on Beads directly.
+
+Eval-case creation should use a separate eval-case path rather than being embedded in `IssueDraft`. Claim corrections and scope corrections often need regression coverage even when they do not require a code ticket.
+
+## Re-Extraction Policy
+
+Re-extraction is a normal maintenance operation, not a special migration.
+
+Trigger re-extraction when:
+
+- a new manual edition or source version is ingested
+- OCR, page rendering, or table extraction improves
+- terminology mappings change in a way that affects component/spec normalization
+- extraction rules or model prompts change
+- a disputed claim indicates the extractor missed section/table context
+
+Re-extraction should create a new extraction run and new observations. The artifact assembler should compare new observations to current claims, preserve prior artifact events, and create validation or dispute events when new evidence changes a claim. It should not overwrite current artifacts silently.
+
+## Relationship To Retrieval And Agent Layer
+
+The existing page-aware retrieval pipeline remains actively maintained in v1. It has three roles:
+
+- fallback when no artifact covers the question
+- evidence display for artifact citations
+- benchmark comparator for evaluating whether artifact-first answers are better
+
+Artifact-first should launch behind a flag or request option until evals show a clear answer-quality improvement over raw retrieval. Raw retrieval should stay exercised by tests and evals so it does not atrophy.
+
+The agent layer is redefined rather than replaced. For artifact-covered questions, the agent should select scope, retrieve the right artifact, follow artifact cross-references, decide whether clarification is needed, and only then fall back to raw retrieval. For uncovered or multi-source questions, the agent still decomposes the task and uses retrieval primitives. Artifact-first narrows the agent's search space; it does not remove the need for agent orchestration.
 
 ## Architecture Boundaries
 
@@ -330,6 +433,7 @@ Core domain concepts:
 - `Artifact`
 - `ArtifactVersion`
 - `ArtifactClaim`
+- `ArtifactEvent`
 - `ValidationEvent`
 - `ValidatorProfile`
 - `IssueDraft`
@@ -343,13 +447,15 @@ Application ports:
 - `ArtifactAnswerService`
 - `FeedbackTriageAgent`
 - `IssueSink`
+- `EvalCaseSink`
 
 Workshop-specific adapters:
 
 - PDF/manual source ingestor
-- torque/spec extractor
+- deterministic-first torque/spec extractor
 - component/spec artifact assembler
 - vehicle-repair terminology/profile adapter
+- Postgres artifact repository
 
 Future adapters:
 
@@ -362,12 +468,16 @@ Future adapters:
 
 The first implementation should stay narrow:
 
-1. Extract Ferrari 360 suspension and adjacent service torque/spec observations from existing manual units.
-2. Assemble pending `component_spec_artifact` records.
-3. Add artifact-first answer path for component/spec questions.
-4. Show trust labels and source citations.
-5. Capture validation feedback from the system owner.
-6. Route tooling/code-change feedback to Beads through an `IssueSink` adapter.
+1. Create a Postgres-backed side store for observations, artifacts, artifact claims, artifact events, validation events, and current projections.
+2. Extract Ferrari 360 suspension and adjacent service torque/spec observations from existing manual units into that side store.
+3. Manually verify extraction quality against a 20-30 question/page sample before using artifacts in `/knowledge/ask`.
+4. Assemble `component_spec_artifact` records only.
+5. Add artifact-first answer path for component/spec questions behind a flag or explicit request option.
+6. Show trust labels and source citations.
+7. Capture validation feedback from the system owner.
+8. Seed eval cases for reproducible extraction/retrieval failures.
+9. Route tooling/code-change feedback to Beads through an `IssueSink` adapter.
+10. Compare artifact-first answers with raw retrieval answers on the eval set before making artifact-first the default.
 
 This slice is intentionally not a full manual-understanding engine. It proves that artifact-first retrieval improves dogfood answers and produces a better improvement loop than page retrieval alone.
 
@@ -376,13 +486,16 @@ This slice is intentionally not a full manual-understanding engine. It proves th
 Minimum coverage:
 
 - source authority defaulting and user override behavior
-- observation extraction from known Ferrari 360 manual pages
+- deterministic-first observation extraction from known Ferrari 360 manual pages
+- extraction confidence factor reporting
+- extraction run replay/re-extraction behavior
+- Postgres artifact repository persistence and current projection rebuild
 - claim/artifact trust transitions
-- validator authority weighting for feedback
+- v1 `system_owner` validation behavior and guards for unsupported validator levels
 - artifact-first answers include trust labels and citations
 - raw retrieval fallback still works when no artifact exists
-- feedback triage classification for claim correction, scope correction, extraction gap, retrieval gap, and issue draft
-- eval-case creation from disputed or corrected answers
+- feedback triage classification for claim correction, scope correction, extraction gap, retrieval gap, eval-case seed, and engineering ticket
+- eval-case creation from disputed or corrected answers without requiring an issue draft
 
 The lower-control-arm torque question should become a regression case:
 
@@ -393,11 +506,12 @@ The lower-control-arm torque question should become a regression case:
 
 These should be resolved during implementation planning, not in this design:
 
-- exact storage schema for observations and artifacts
-- whether file-backed JSON remains acceptable for the first dogfood artifact store or whether this is the point to introduce Postgres tables
-- exact confidence scoring formula
-- exact validator promotion/demotion thresholds
-- whether pending artifacts should answer by default in all domains or only in configured dogfood domains
+- exact Postgres table shapes and indexes
+- exact extraction confidence scoring weights and thresholds after manual calibration
+- exact 20-30 question/page sample for manual extraction verification
+- exact flag/request shape for comparing artifact-first answers against raw retrieval
+- exact validator promotion/demotion thresholds for Phase 2
+- whether extracted artifacts should answer by default in all domains or only in configured dogfood domains
 
 ## Success Criteria
 
