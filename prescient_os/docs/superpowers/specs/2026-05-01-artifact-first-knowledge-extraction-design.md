@@ -123,6 +123,21 @@ Each observation should include:
 - contradiction links
 - validation state
 
+Observation `claim_type` and artifact-claim `claim_type` share the same closed type space. V1 starts with `torque_spec`, `procedure_step`, `applicability`, and `cross_reference`; later domains may add values, but observation and artifact projections should not drift into separate enums.
+
+Applicability should be structured even when v1 stores it in a flexible JSON field:
+
+```yaml
+applicability:
+  domain: vehicle_repair
+  make: Ferrari
+  model: 360 Modena
+  variant: null      # null means applies to all variants in the scoped family
+  year_range: [1999, 2005]
+```
+
+Missing applicability fields should lower extraction confidence and may require clarification before answer use.
+
 For workshop manuals, first useful observation types are:
 
 - torque specs
@@ -156,6 +171,8 @@ For Ferrari 360 torque/spec extraction, use a deterministic-first pipeline:
 5. Use an LLM only as a bounded classifier/normalizer when deterministic parsing produces candidates, not as the sole source of a value.
 6. Emit observations with provenance to exact source units/pages and extraction-run metadata.
 
+Bounded LLM use means the model chooses among already-extracted candidates or normalizes scoped text, not invents a claim. Examples: disambiguating `lower arm` between front and rear when section context is unclear, choosing the correct unit when OCR strips nearby unit labels, or resolving an abbreviation against the active terminology profile.
+
 Initial extraction confidence should be explainable rather than opaque. It should be derived from visible factors:
 
 - numeric value and unit were parsed cleanly
@@ -166,9 +183,13 @@ Initial extraction confidence should be explainable rather than opaque. It shoul
 - contradictory values exist for the same candidate claim
 - required applicability fields are missing
 
+`extraction_confidence` is a single 0.0-1.0 score for sorting, thresholds, and answer policy. It must be accompanied by structured `confidence_factors` that list the visible factors used to compute the score so a user or eval can inspect why a claim was considered strong or weak.
+
 When the same candidate fact appears with different values or scopes, the extractor should emit separate observations and mark them as conflicting candidates. The artifact assembler should not average or silently pick a value. It should either choose the highest-supported claim with a visible dispute note or create a disputed draft claim for validation.
 
 Extraction must be re-runnable. Each run should have an extraction-run id, parser/profile version, input source snapshot, and output observation ids so improved OCR, better table extraction, new terminology mappings, or new manual editions can produce new observations without overwriting the old ones.
+
+The input source snapshot is the immutable source-unit view the extractor read: source ids, content fingerprints, source-unit ids, source-unit text fingerprints, locator/page metadata fingerprints, and active parser/profile versions. It is not a copy of every raw PDF byte; it is the versioned reference that lets a later run explain exactly which indexed source state produced an observation.
 
 ## Artifact Layer
 
@@ -217,6 +238,10 @@ related_procedures:
 Artifacts may include extracted, not-yet-validated claims. They do not need to be perfect before they become useful, but answer surfaces must expose trust state clearly.
 
 Terminology workbench mappings and artifact aliases should be one system, not two. The workbench should create scoped alias claims, and the artifact assembler should project those aliases into relevant artifacts. Artifact-local aliases may still be displayed for convenience, but the durable source of truth is the scoped terminology/alias claim so `vehicle_repair_v1`, `ferrari_v1`, `ferrari_360_v1`, and source-specific mappings do not drift from artifact records.
+
+A terminology mapping can exist before a matching artifact exists. In that case it remains in the terminology layer and is projected into future artifacts when an assembler later creates an artifact whose scope/entity matches the mapping's applicability layers.
+
+`artifact.scope` should correspond to the active retrieval-profile layer set, even if v1 stores a compact flat object for convenience. For Ferrari 360 dogfooding, the artifact scope should be derivable from layers such as `domain:vehicle_repair:v1`, `org:ferrari:v1`, and `product:ferrari_360:v1`; future business/legal domains should not need a separate scoping system.
 
 ## Storage And Versioning
 
@@ -397,6 +422,22 @@ No domain logic should depend on Beads directly.
 
 Eval-case creation should use a separate eval-case path rather than being embedded in `IssueDraft`. Claim corrections and scope corrections often need regression coverage even when they do not require a code ticket.
 
+## Eval Case Sink Boundary
+
+`EvalCaseSink` is the application port for turning reproducible knowledge failures into regression coverage. It should accept structured eval-case drafts with:
+
+- failing question
+- expected behavior
+- scope id and retrieval profile/layer set
+- source-of-truth artifact id and claim id when available
+- required evidence source ids, unit ids, and page/message ids
+- originating answer id, observation ids, validation event ids, or triage event ids
+- suspected failure category
+- answer text shown to the user
+- expected correction or required claim text when known
+
+This keeps eval promotion separate from issue creation. A claim correction may need a regression case without a code ticket, while an engineering failure may need both an eval case and an `IssueDraft`.
+
 ## Re-Extraction Policy
 
 Re-extraction is a normal maintenance operation, not a special migration.
@@ -410,6 +451,12 @@ Trigger re-extraction when:
 - a disputed claim indicates the extractor missed section/table context
 
 Re-extraction should create a new extraction run and new observations. The artifact assembler should compare new observations to current claims, preserve prior artifact events, and create validation or dispute events when new evidence changes a claim. It should not overwrite current artifacts silently.
+
+Conflict handling should be explicit:
+
+- If new observations agree with the current claim, add the observation ids to the claim's supporting provenance without changing trust state.
+- If new observations disagree and have higher extraction confidence or stronger source authority, create a dispute event for validation; do not auto-supersede the current claim.
+- If new observations refine applicability, such as adding a year range or narrowing a variant, create a `claim_corrected` event with refinement payload and preserve the prior broader claim in history.
 
 ## Relationship To Retrieval And Agent Layer
 
@@ -466,18 +513,26 @@ Future adapters:
 
 ## First Implementation Slice
 
-The first implementation should stay narrow:
+The first implementation should stay narrow. The current dogfood branch has landed the initial backend spine:
 
-1. Create a Postgres-backed side store for observations, artifacts, artifact claims, artifact events, validation events, and current projections.
-2. Extract Ferrari 360 suspension and adjacent service torque/spec observations from existing manual units into that side store.
-3. Manually verify extraction quality against a 20-30 question/page sample before using artifacts in `/knowledge/ask`.
-4. Assemble `component_spec_artifact` records only.
-5. Add artifact-first answer path for component/spec questions behind a flag or explicit request option.
-6. Show trust labels and source citations.
-7. Capture validation feedback from the system owner.
-8. Seed eval cases for reproducible extraction/retrieval failures.
-9. Route tooling/code-change feedback to Beads through an `IssueSink` adapter.
-10. Compare artifact-first answers with raw retrieval answers on the eval set before making artifact-first the default.
+- Postgres-backed side store for extraction runs, observations, artifacts, artifact claims, validation events, feedback triage events, and current projections.
+- deterministic-first Ferrari 360 torque/spec extraction from existing manual units.
+- `component_spec_artifact` assembly.
+- artifact-first answer path behind an explicit request option.
+- trust labels, source citations, claim identity, system-owner validation, and feedback triage/regression seed capture.
+
+Remaining implementation should be sequenced by dependency:
+
+1. Manually verify extraction quality against a 20-30 question/page sample before expanding artifact coverage.
+2. Add eval-case promotion for reproducible claim, scope, extraction, and retrieval failures.
+3. Route only `engineering_ticket` triage outcomes through an `IssueSink` adapter; keep eval-case creation on the separate `EvalCaseSink` path.
+4. Compare artifact-first answers with raw retrieval answers on the eval set before making artifact-first the default.
+
+Parallelization guidance:
+
+- Extraction-rule improvements and manual verification can proceed together, but artifact coverage should not expand until the verification sample is reviewed.
+- Eval-case promotion and `IssueSink` wiring are independent adapter slices once triage events exist.
+- Artifact-first defaulting is blocked on the comparison report, not on the existence of extracted artifacts alone.
 
 This slice is intentionally not a full manual-understanding engine. It proves that artifact-first retrieval improves dogfood answers and produces a better improvement loop than page retrieval alone.
 
