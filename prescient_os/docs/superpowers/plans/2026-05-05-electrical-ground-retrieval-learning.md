@@ -6,7 +6,7 @@
 
 **Architecture:** Add a generic `catalog_lookup` retrieval intent in code, then keep domain-specific electrical ground vocabulary in approved terminology data. Reuse the existing bounded candidate-context expansion path with catalog-specific settings, add strict catalog-answer guidance, and capture the miss in the canonical workshop eval set.
 
-**Tech Stack:** FastAPI, Pydantic v2, existing workshop retrieval profile, layered terminology mappings, Postgres-backed terminology storage target, OpenSearch retrieval preview, pytest integration/unit tests, `eval/questions/workshop_manuals_v1.yaml`, Beads issue `prescient_os-2lp`.
+**Tech Stack:** FastAPI, Pydantic v2, existing workshop retrieval profile, layered terminology mappings, active JSON-backed `WorkshopManualStore` terminology storage, OpenSearch retrieval preview, pytest integration/unit tests, `eval/questions/workshop_manuals_v1.yaml`, Beads issue `prescient_os-2lp`.
 
 ---
 
@@ -35,7 +35,7 @@ The system failed because retrieval did not understand that "electrical grounds"
    **Why:** `catalog_lookup` is reusable across vehicle manuals, business records, contracts, tickets, emails, forums, and future corpora. The code can learn one behavior: retrieve a set/list/catalog across a bounded source region.
 
 2. **Store expansion vocabulary in terminology data, not retrieval code.**
-   Terms like `earth`, `massa`, and `general earth` should be approved terminology mappings in the persistent terminology store. Code may contain cue terms for intent detection, but query expansion terms must come through the same mapping path that user-approved and agent-proposed mappings will use.
+   Terms like `earth`, `massa`, and `general earth` should be approved terminology mappings in the active terminology store. For v1, that store is `WorkshopManualStore` writing `terminology_mappings.json`; the durable target is a Postgres-backed terminology repository tracked as follow-up work. Code may contain cue terms for intent detection, but query expansion terms must come through the same mapping path that user-approved and agent-proposed mappings will use.
 
    Example mapping:
 
@@ -45,11 +45,12 @@ The system failed because retrieval did not understand that "electrical grounds"
      "aliases": ["electrical ground", "earth", "massa", "general earth", "power ground"],
      "retrieval_profile_id": "vehicle_repair_v1",
      "applicability_layers": ["domain:vehicle_repair:v1"],
+     "applicability_layer_kinds": {"domain:vehicle_repair:v1": "domain"},
      "status": "approved"
    }
    ```
 
-   **Why:** This keeps the system general. New domains should add rows/migrations/seeds, not new Python conditionals. It also lets the human-in-the-loop workflow approve, reject, or scope terminology without redeploying retrieval logic.
+   **Why:** This keeps the system general. New domains should add mapping data, not new Python conditionals. It also lets the human-in-the-loop workflow approve, reject, or scope terminology without redeploying retrieval logic. Using the JSON store now keeps this fix inside the current dogfood architecture; moving terminology to Postgres is a storage refactor, not a prerequisite for fixing retrieval quality.
 
 3. **Reuse the existing candidate context expansion path.**
    `routes_knowledge.py` already expands adjacent units for procedure questions. Refactor that helper into a generic bounded expander with per-intent rules; do not create a second parallel implementation.
@@ -127,6 +128,10 @@ Expected behavior:
   - `massa`
   - `wiring diagram`
   - `wiring diagrams`
+- [ ] Keep the cue list separate from the Task 2 alias list even where terms overlap.
+
+  Cues answer "is this a catalog-style lookup?" Aliases answer "what vocabulary should retrieval expand to once a mapping applies?" The lists intentionally overlap in v1 and may diverge as the terminology data grows.
+
 - [ ] Add a failing unit test:
 
 ```python
@@ -152,16 +157,54 @@ Expected after implementation: the test passes.
 
 ## Task 2: Seed Electrical Ground Terminology as Persistent Data
 
-**Why:** Query expansion terms must live in the DB-backed terminology layer, not in `built_in_vehicle_repair_query_terms`. Built-ins are acceptable for generic intent cues, but not for domain vocabulary that will vary by product, source, and user feedback.
+**Why:** Query expansion terms must live in active terminology data, not in `built_in_vehicle_repair_query_terms`. For v1, the active terminology store is JSON-backed through `WorkshopManualStore.upsert_terminology_mapping(...)`. Built-ins are acceptable for generic intent cues, but not for domain vocabulary that will vary by product, source, and user feedback.
 
 **Files:**
-- Modify: `apps/api/src/prescient_benchmark/knowledge/terminology.py` only if the current model cannot represent the seed.
-- Modify: the existing Postgres terminology repository/migration/seed path for approved mappings.
-- Modify: `apps/api/src/prescient_benchmark/workshop_manuals/store.py` only as a compatibility adapter if the dogfood path still reads terminology through `KnowledgeStore`.
+- Create: `apps/api/src/prescient_benchmark/workshop_manuals/terminology_seed.py`
+- Modify: `apps/api/src/prescient_benchmark/cli.py`
 - Test: `tests/unit/test_terminology_mappings.py`
 - Test: `tests/integration/test_workshop_api.py`
 
-- [ ] Add or update the DB seed/migration so the active terminology store contains an approved mapping:
+- [ ] Add a seed helper that constructs a real `TerminologyMapping` model and writes it through `store.upsert_terminology_mapping(...)`.
+
+```python
+from prescient_benchmark.knowledge.store import KnowledgeStore
+from prescient_benchmark.knowledge.terminology import (
+    TerminologyMapping,
+    TerminologyMappingStatus,
+)
+
+
+GROUND_CONNECTION_MAPPING = TerminologyMapping(
+    mapping_id="mapping-vehicle-repair-ground-connection",
+    canonical_term="ground connection",
+    aliases=[
+        "electrical ground",
+        "electrical grounds",
+        "ground connections",
+        "earth",
+        "general earth",
+        "electronic ground",
+        "power ground",
+        "massa",
+        "wiring diagrams",
+        "L 4 wiring diagrams",
+    ],
+    retrieval_profile_id="vehicle_repair_v1",
+    applicability_layers=["domain:vehicle_repair:v1"],
+    applicability_layer_kinds={"domain:vehicle_repair:v1": "domain"},
+    intent_tags=["catalog_lookup"],
+    status=TerminologyMappingStatus.APPROVED,
+    created_by="system_seed",
+)
+
+
+def seed_vehicle_repair_terminology(store: KnowledgeStore) -> None:
+    store.upsert_terminology_mapping(GROUND_CONNECTION_MAPPING)
+```
+
+- [ ] Call `seed_vehicle_repair_terminology(store)` from `ingest-workshop-manuals` after source ingestion succeeds so local dogfood stores get the mapping automatically.
+- [ ] The active store should contain an approved mapping equivalent to:
 
 ```json
 {
@@ -188,6 +231,7 @@ Expected after implementation: the test passes.
 }
 ```
 
+- [ ] Add a unit test that constructs `GROUND_CONNECTION_MAPPING` as a `TerminologyMapping` instance and asserts `applicability_layer_kinds == {"domain:vehicle_repair:v1": "domain"}`.
 - [ ] Add a unit test proving `compose_terminology_for_query(...)` returns the canonical and alias expansion terms when the query contains `electrical grounds` and intent is `catalog_lookup`.
 - [ ] Add an integration test proving the API route sees the seeded mapping via `store.list_terminology_mappings()`.
 - [ ] Run:
@@ -199,7 +243,7 @@ uv run python -m pytest \
   -q
 ```
 
-Expected: expansion terms come from approved terminology data. No electrical expansion list is added to `built_in_vehicle_repair_query_terms`.
+Expected: expansion terms come from approved terminology data persisted by `WorkshopManualStore`. No electrical expansion list is added to `built_in_vehicle_repair_query_terms`.
 
 ## Task 3: Verify Corpus Evidence Before Retrieval Assertions
 
@@ -207,7 +251,6 @@ Expected: expansion terms come from approved terminology data. No electrical exp
 
 **Files:**
 - Test: `tests/integration/test_workshop_api.py`
-- Modify if useful: `apps/api/src/prescient_benchmark/workshop_manuals/eval.py` for shared helpers only.
 
 - [ ] Add a small corpus-evidence assertion helper in the test module:
 
@@ -251,12 +294,14 @@ Expected: if the corpus fixture is correct, the helper passes. If it fails, fix 
 - [ ] Assert the default `auto` retrieval path selects the L4/ground pages for the electrical grounds query.
 - [ ] Assert `applied_mappings` includes the ground connection mapping.
 - [ ] Do not add electrical expansion vocabulary to `built_in_vehicle_repair_query_terms`.
-- [ ] Add rerank support for `catalog_lookup` that boosts:
+- [ ] Add a `RerankRuleConfig` entry for `catalog_lookup` on `VEHICLE_REPAIR_PROFILE`.
+- [ ] Update `_matched_terms(...)`, `_evidence_flags(...)`, and `_rerank_delta(...)` so `catalog_lookup` boosts:
   - matched approved mapping terms,
   - `wiring diagram` / `wiring diagrams`,
   - `ground connection`,
   - `earth`,
   - `massa`.
+- [ ] Keep the boost generic to the catalog retrieval shape: matched mapping terms should provide most of the lift, while the wiring/ground terms are seed data surfaced through `extra_terms`.
 - [ ] Run:
 
 ```bash
@@ -280,6 +325,7 @@ Expected after implementation: the test retrieves L4/ground pages and reports th
   - `procedure`: existing ±1 window, max 10 units.
   - `catalog_lookup`: include nearby same-source units around high-ranked catalog hits, max 12 units.
   - all other intents: preserve current truncation behavior.
+- [ ] Plumb the `catalog_lookup` `max_units=12` setting at the call site, not only in the helper signature.
 - [ ] Preserve ordering and deduplication.
 - [ ] Add a focused test proving a guide page at ordinal 463 expands into nearby L4 pages but does not pull unrelated later bodywork pages.
 - [ ] Update every call site to use `_expand_candidate_context(...)`.
@@ -309,6 +355,16 @@ Expected: the shared expander handles both procedure and catalog lookup without 
 ```
 
 - [ ] Assert retrieved/cited candidate units include L4 wiring diagram ground pages.
+- [ ] Assert `applied_mappings` includes:
+
+```json
+{
+  "alias": "electrical grounds",
+  "canonical_term": "ground connection",
+  "applicability_layers": ["domain:vehicle_repair:v1"]
+}
+```
+
 - [ ] Ensure `_search_agent_query(...)` composes terminology for the effective `catalog_lookup` intent.
 - [ ] Run:
 
@@ -333,11 +389,11 @@ Expected: agent-mode retrieval uses the same terminology and catalog context beh
   - Mark `ambiguous` only when sources conflict or scope is genuinely unclear.
 - [ ] Add a deterministic test provider for the electrical ground scenario.
 - [ ] Assert the API response status is `answered`.
-- [ ] Assert the answer text includes a caveat like:
-
-```text
-The manual lists these as wiring harness/table ground IDs, not as a single physical-location list.
-```
+- [ ] Assert the answer text contains stable caveat terms rather than an exact sentence:
+  - `harness`
+  - `table`
+  - `ground`
+- [ ] Assert the answer text does not claim the manual provides a single physical-location list.
 
 - [ ] Run:
 
@@ -379,7 +435,7 @@ Expected: the answer cites L4 pages, lists supported ground references, and expl
           - unit-source-ferrari-360-wsm-p489
 ```
 
-- [ ] Update `tests/unit/test_workshop_eval.py` only if it needs explicit category expectations.
+- [ ] Add a `tests/unit/test_workshop_eval.py` assertion that the loaded question has `category == "catalog"` and contains the four required electrical-ground unit IDs.
 - [ ] Run:
 
 ```bash
@@ -464,11 +520,16 @@ Expected:
 - Do not add frontend-specific terminology constants.
 - Do not add narrow code intents like `electrical_catalog`.
 - Do not add electrical expansion vocabulary to `built_in_vehicle_repair_query_terms`.
+- Do not refactor existing alignment vocabulary in `built_in_vehicle_repair_query_terms` in this task. It is an older domain-specific code carve-out and should be tracked as follow-up cleanup.
+- Do not build Postgres terminology storage in this task. The v1 implementation uses `WorkshopManualStore`; Postgres terminology belongs in a separate repository/migration plan.
 - Do not make user feedback automatically authoritative.
 - Do not solve forum/email/non-manual source trust in this task.
 
 ## Execution Notes
 
-- If the current dogfood path still uses JSON-backed `WorkshopManualStore` for terminology, keep the implementation behind the existing `KnowledgeStore` protocol and seed the active local store through the same repository interface. The durable design target remains DB-backed terminology data.
+- Use JSON-backed `WorkshopManualStore` for v1 terminology persistence. Keep new code behind the existing `KnowledgeStore` protocol so a future Postgres terminology repository can replace storage without changing retrieval logic.
+- Create Beads follow-ups for:
+  - `prescient_os-3sg`: Postgres-backed terminology repository/migrations/seeding.
+  - `prescient_os-yyg`: Migrating existing alignment built-ins from code into approved terminology data.
 - Make small commits per task.
 - Keep unrelated dirty files out of commits.
