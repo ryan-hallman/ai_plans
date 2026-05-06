@@ -265,7 +265,7 @@ The ingestion pipeline should scan the configured 360-family folders under `~/Pr
 
 Initial source set:
 
-- `Ferrari 360 Modena/ferrari_360_wsm_english.pdf`
+- `Ferrari 360 Modena/ferrari_360_wsm.pdf`
 - `Ferrari 360 Challenge Stradale/206990-Ferrari_360_Challenge_Stradale_1999-2005.pdf`
 - `Ferrari 360 Challenge/1_Chall_mo_GB.pdf`
 - `Ferrari 360 Challenge/0_REGTECN_Chall_I-GB.pdf`

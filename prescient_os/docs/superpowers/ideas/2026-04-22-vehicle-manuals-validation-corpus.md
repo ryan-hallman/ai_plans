@@ -29,7 +29,7 @@ No synthetic benchmark matches that combination.
 `../manuals/`, ~1.0 GB, 12 PDFs:
 
 **Ferrari 360 family**
-- `ferrari_360_wsm_english.pdf` (673 MB) — main 360 workshop manual
+- `ferrari_360_wsm.pdf` — complete multilingual 360 workshop manual
 - `206990-Ferrari_360_Challenge_Stradale_1999-2005.pdf` (79 MB) — Challenge Stradale (road, trackday)
 - `223037-Ferrari_360_Gearbox.pdf` (15 MB) — 360 gearbox-specific
 - `01–05 ...` (28 MB total) — the Ferrari 360 **Challenge** (race car) documentation set: Technical Regulations 2000, Technical Features & Usage, Data Acquisition System, Gearbox & Differential Overhaul, Spare Parts Catalogue
