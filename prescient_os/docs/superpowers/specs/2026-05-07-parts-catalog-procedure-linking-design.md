@@ -134,9 +134,13 @@ boundary between tiers.
 
 ### Milestone 4: Review Surface V1
 
-Expose explicit, inferred, and review-held candidates in the answer/planning
+Expose explicit, inferred, and `needs_review` candidates in the answer/planning
 surface with citations, fitment warnings, and source notes. The surface may help
 the user inspect a parts list, but still does not perform vendor shopping.
+
+This milestone is complete only when the rendered output schema is covered by
+eval cases and at least one reviewer has used the surface to accept, reject, or
+annotate at least 10 candidate parts-list decisions.
 
 ## Entity Namespacing
 
@@ -196,6 +200,16 @@ equivalence_observation:
 
 Those observations are useful for search and review, but they do not merge the
 underlying scoped records in v1.
+
+Trust states reuse the artifact-substrate vocabulary:
+
+| State | Meaning |
+| --- | --- |
+| `extracted` | Emitted by extraction or linking and not yet reviewed. |
+| `reviewed` | Accepted or corrected by a human reviewer for the scoped context. |
+| `disputed` | Challenged by a reviewer or contradictory evidence. |
+| `superseded` | Replaced by a newer source, extraction run, or reviewed decision. |
+| `stale` | Referenced source rows, fingerprints, or terminology versions changed and the observation needs re-derivation. |
 
 ## Parts Catalog Artifact
 
@@ -261,6 +275,12 @@ interpretation:
 6. Use an LLM only to classify already-extracted note text or resolve ambiguous
    multiline row continuation, not to invent rows or part numbers.
 
+OCR-derived text is in scope. OCR errors in part numbers are catastrophic, so
+part-number records from low-confidence OCR or malformed text extraction should
+be rejected or sent to `needs_review` unless they agree with an independent
+catalog signal such as a reverse index, repeated row occurrence, or
+manufacturer-specific part-number format check.
+
 Field robustness should be tracked separately:
 
 | Field | Expected robustness | Notes |
@@ -275,15 +295,20 @@ Field robustness should be tracked separately:
 
 Extraction confidence is row-level in v0, with optional field-level diagnostics.
 Do not expose decorative numeric confidence until the factors are defined and
-used. Store confidence factors such as:
+used. Store confidence factors with polarity:
 
-- required fields parsed
-- row shape matched expected profile
-- quantity parsed as valid value or known marker
-- note continuation was deterministic vs model-assisted
-- table/ref agreed with reverse index
-- duplicate callout or duplicate part number required review
-- source page layout was malformed
+```yaml
+confidence_factors:
+  supports:
+    - required_fields_parsed
+    - row_shape_matched_expected_profile
+    - quantity_parsed_as_valid_value_or_known_marker
+    - table_ref_agreed_with_reverse_index
+  weakens:
+    - note_continuation_required_model_assistance
+    - duplicate_callout_or_duplicate_part_number_required_review
+    - source_page_layout_was_malformed
+```
 
 If a numeric score is added later, it must be derived from these factors and
 documented with threshold behavior.
@@ -295,30 +320,34 @@ It can point to a table, assembly, callout, part, or set of candidate nodes.
 In v0, `procedure_ref` may be a source unit or section reference rather than a
 durable `procedure_artifact`.
 
-Example:
+M2 explicit example:
 
 ```yaml
 procedure_parts_link:
-  procedure_ref: vehicle_repair:ferrari:360_modena:wsm_1999:procedure:gearbox_flange_grommet_replacement
-  catalog_ref: vehicle_repair:ferrari:360_modena:spare_parts_catalogue_2000:table:26
-  relationship_basis: strong_inferred
+  procedure_ref: vehicle_repair:ferrari:360_modena:wsm_1999:source_unit:brake-system-service
+  catalog_ref: vehicle_repair:ferrari:360_modena:spare_parts_catalogue_2000:part:183100
+  relationship_basis: explicit
   confidence_factors:
-    - procedure_component_term_matches_catalog_table_title
-    - namespace_scope_matches
-    - catalog_table_contains_matching_part_family_terms
+    supports:
+      - exact_part_number_match
+      - namespace_scope_matches
+      - reverse_index_agrees
+    weakens: []
   rationale_facts:
     - source: procedure
-      fact: gearbox housing external components
-    - source: catalog_table
-      fact: table 26 is Gearbox - Covers
-    - source: terminology
-      fact: flange, cover, bearing, and gasket terms overlap
+      fact: source unit explicitly mentions part number 183100
+    - source: catalog_row
+      fact: part 183100 appears in table 33, callout 12
   provenance:
     - source_id: source-ferrari-360-wsm
       unit_id: page-or-section-id
     - source_id: source-ferrari-360-spare-parts-2000
-      unit_id: table-26-page-or-range
+      unit_id: table-33-page-or-range
 ```
+
+M3+ inferred links use the same shape with `relationship_basis:
+strong_inferred` or `weak_inferred` and rationale facts describing the
+terminology, namespace, and catalog-context evidence.
 
 `relationship_basis` is required:
 
@@ -327,7 +356,7 @@ procedure_parts_link:
 | `explicit` | Procedure or catalog text names the part, part number, assembly, or table directly. | Include by default. |
 | `strong_inferred` | Procedure component maps cleanly to a catalog assembly or table through deterministic terminology, title, and namespace support. | Include by default with inference label after v1 gates pass. |
 | `weak_inferred` | Likely supporting parts or consumables inferred from same-table or adjacent-assembly context but not named by the procedure. | Show as suggested. |
-| `uncertain` | Candidate needs review because scope, fitment, or mapping is ambiguous. | Hold for review. |
+| `uncertain` | Candidate needs review because scope, fitment, or mapping is ambiguous. | Place in `needs_review`. |
 
 The answer surface must never flatten these tiers into a single undifferentiated
 parts list.
@@ -354,6 +383,10 @@ v1.
 - the active namespace resolves to one catalog table or assembly family
 - no fitment, side, color, oversize, or availability note forces review
 
+Fragile fields such as notes cannot be primary evidence for upgrading a link to
+`strong_inferred`. They may only add warnings, fitment notes, or downgrade a
+candidate to `uncertain` or `needs_review`.
+
 `weak_inferred` applies when the part is plausible from same-table or
 same-assembly context, but the procedure does not name it and deterministic
 evidence does not isolate it as required. Common examples are fasteners, washers,
@@ -379,7 +412,7 @@ show_as_suggested
   weak inferred links
   consumables or adjacent parts likely needed but not named
 
-hold_for_review
+needs_review
   uncertain fitment
   ambiguous manufacturer/model scope
   parts marked not available separately
@@ -415,6 +448,11 @@ more than query-expansion aliases. Link-time terminology records should expose:
 Aliases without a `term_kind` can help retrieve evidence, but they should not by
 themselves create a `strong_inferred` link. Strong inference requires scoped
 component or assembly terminology plus catalog namespace support.
+
+Title matching should normalize language, case, punctuation, and paired
+translations before comparison. For bilingual catalogs, the linker should compare
+English and source-language title spans separately rather than treating the
+combined bilingual heading as one opaque string.
 
 ## Architecture And Data Flow
 
@@ -461,7 +499,7 @@ required_parts:
         variant: null
         source_id: source-ferrari-360-spare-parts-2000
       part_number: "183100"
-      manufacturer_label: Ferrari
+      catalog_label: Ferrari S.p.A.
       description: Brakes hose
       quantity:
         value: 4
@@ -473,9 +511,11 @@ required_parts:
           source_unit_id: catalog-page-or-table-unit
       relationship_basis: explicit
       confidence_factors:
-        - exact_part_number_match
-        - namespace_scope_matches
-        - reverse_index_agrees
+        supports:
+          - exact_part_number_match
+          - namespace_scope_matches
+          - reverse_index_agrees
+        weakens: []
       rationale_facts:
         - source: procedure
           fact: source unit explicitly mentions part number 183100
@@ -497,13 +537,21 @@ warnings:
 ```
 
 Vendor shopping remains downstream. It can later consume normalized part numbers,
-manufacturer labels, aliases, fitment notes, and provenance. It should not
-influence catalog extraction or procedure linking.
+catalog labels, aliases, fitment notes, and provenance. It should not influence
+catalog extraction or procedure linking.
 
 Each item in `inferred` and `needs_review` uses the same record shape as
 `explicit`. The `relationship_basis`, `confidence_factors`, `rationale_facts`,
 `fitment_notes`, and `warnings` fields explain why the item is not explicit or
 why it requires review.
+
+Field definitions:
+
+| Field | Definition |
+| --- | --- |
+| `item_id` | Output-local stable identifier for the generated parts-list item. It is stable within one output payload only unless the item is promoted to a durable artifact or link id. |
+| `catalog_label` | Manufacturer or catalog publisher label as printed or normalized from source metadata. It may differ from `namespace.manufacturer`; omit it when it adds no information. |
+| `quantity.basis` | One of `catalog_row`, `procedure_text`, `kit_contents`, `inferred`, or `unknown`. Use `unknown` when quantity cannot be trusted for ordering. |
 
 ## Error Handling
 
@@ -533,7 +581,7 @@ Unavailable part behavior:
 Variant-dependent parts:
 
 - Left/right, oversize, color, chassis/engine, or `Possible fitting` cases go to
-  `hold_for_review` unless the procedure or user scope resolves the variant.
+  `needs_review` unless the procedure or user scope resolves the variant.
 
 ## Incremental Re-Extraction
 
@@ -552,6 +600,10 @@ and re-derived. Existing reviewed decisions should not be overwritten silently;
 they should be carried forward only when their referenced scoped rows still
 exist and their source fingerprints match, otherwise they should return to
 review.
+
+Equivalence observations follow the same lifecycle: if any referenced scoped row
+is removed, renamed, or re-derived with a changed source fingerprint, the
+equivalence observation becomes `stale` and must be re-derived or reviewed.
 
 ## Verification
 
@@ -578,6 +630,12 @@ Linking gates:
   `uncertain`.
 - Ensure inferred parts are never labeled explicit.
 - Ensure shopping fields and vendor behavior are absent from this milestone.
+
+Eval cases should live under `eval/` with the workshop eval assets unless the
+implementation plan chooses a more specific fixture path. Each case should name
+the source unit, expected catalog refs, expected relationship basis, and required
+provenance refs. Human-reviewed corrections should be eligible for promotion
+into this eval set.
 
 Manufacturer-neutral checks:
 
