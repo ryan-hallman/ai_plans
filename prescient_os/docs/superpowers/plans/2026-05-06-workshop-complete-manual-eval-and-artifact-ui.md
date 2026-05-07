@@ -46,13 +46,13 @@
 
 **Files:**
 - No code changes expected.
-- Local generated corpus under `/home/rhallman/.cache/prescient/workshop_manuals`.
+- Local generated corpus under project `corpus/workshop_manuals`.
 - OpenSearch index `prescient-workshop-v1`.
 
 - [ ] Stop any assumption that old page ordinals are valid.
 - [ ] Move or delete the local generated workshop corpus directory for a clean rebuild.
 - [ ] Run `make dev-services` if Postgres/OpenSearch are not already running.
-- [ ] Run the workshop ingestion command for `~/Projects/workshop_manuals` with indexing enabled.
+- [ ] Run `make ingest-workshop-manuals` for `~/Projects/workshop_manuals` with indexing enabled.
 - [ ] Confirm the new store contains `source-ferrari-360-wsm` with `origin_path` ending in `ferrari_360_wsm.pdf`.
 - [ ] Confirm rendered pages exist for the new source.
 
@@ -77,7 +77,7 @@
 - Generated: `eval/runs/<new-run>/workshop_scorecard.yaml`
 - Modify or create finding if the result needs a durable note under `docs/superpowers/findings/`.
 
-- [ ] Run `uv run python -m prescient_benchmark.cli run-workshop-eval-baseline --question-set-path eval/questions/workshop_manuals_v1.yaml --data-root /home/rhallman/.cache/prescient/workshop_manuals --output-root eval/runs --top-k 10`.
+- [ ] Run `make eval-workshop-baseline`.
 - [ ] Review category summaries and failed-question detail.
 - [ ] If the baseline reveals invalid evidence keys, return to Task 4.
 - [ ] Commit source path, eval diagnostics, eval key updates, and Beads changes.
@@ -102,7 +102,7 @@
 ## Verification
 
 - [ ] `uv run python -m pytest tests/unit/test_workshop_catalog.py tests/unit/test_workshop_eval.py tests/integration/test_workshop_manuals_cli.py tests/integration/test_private_eval_assets.py -q`
-- [ ] `uv run python -m prescient_benchmark.cli run-workshop-eval-baseline --question-set-path eval/questions/workshop_manuals_v1.yaml --data-root /home/rhallman/.cache/prescient/workshop_manuals --output-root eval/runs --top-k 10`
+- [ ] `make eval-workshop-baseline`
 - [ ] `npm run lint` from `apps/web` after the UI task.
 - [ ] `git status --short`
 - [ ] Close `prescient_os-vtt` after the baseline refresh commit.
