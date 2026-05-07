@@ -103,6 +103,10 @@ with it and share one answer contract.
 Only `diagnostic` is validated by current workshop dogfooding demand. The
 mechanism, hypothetical, and planning modes are planned extensions. They should
 not be fully implemented until real user questions or eval cases justify them.
+The diagnostic-first slice is based on current workshop usage patterns such as
+vibration under cornering load, "what could be wrong?" symptom prompts, and
+manual-backed troubleshooting questions that need inspection guidance rather
+than a single quoted procedure.
 
 ## Mode Detection Policy
 
@@ -138,6 +142,17 @@ Classification order:
    changes the safety posture, the system should ask a concise clarifying
    question before giving a diagnostic or hypothetical answer.
 
+Initial confidence thresholds:
+
+- `confidence >= 0.75`: proceed with the selected mode.
+- `0.60 <= confidence < 0.75`: proceed only when the answer can be segmented
+  into clearly labeled modes; otherwise ask for confirmation.
+- `confidence < 0.60`: ask a clarifying question before retrieving broadly or
+  producing diagnostic/hypothetical reasoning.
+
+These thresholds are starting defaults. They should be revisited after the
+first diagnostic eval runs.
+
 Mode boundary defaults:
 
 - `direct_lookup` wins when the user asks for an exact source-backed value.
@@ -150,6 +165,15 @@ Mode boundary defaults:
 
 The UI should show the detected mode and allow override, but the classifier must
 be good enough that most users can leave it on auto.
+
+If retrieval evidence conflicts with the classifier decision, evidence should
+trigger reclassification or segmentation. For example, a diagnostic-classified
+question may retrieve an exact source-backed procedure; the answer should expose
+the direct procedure evidence and then separately label any diagnostic
+inference. Conversely, if a direct-looking question retrieves no direct evidence
+but does retrieve relevant inspection context, the system should not silently
+turn it into a diagnostic answer; it should ask whether the user wants
+troubleshooting guidance.
 
 ## Claim Labels
 
@@ -165,8 +189,6 @@ V1 labels:
   the active corpus
 - `needs_user_observation`: the next step requires user-provided observation
 - `suggested_check`: a practical action or inspection step
-- `safety_relevant`: a warning or stop condition; this is a modifier that may
-  apply to another claim/check
 
 Minimum structured representation:
 
@@ -182,13 +204,27 @@ claim:
   safety_relevant: false
 ```
 
+`safety_relevant` is a boolean modifier on a claim or check, not a claim label.
+It marks stop conditions, warnings, or inspections where unsafe operation or
+incorrect action could cause harm.
+
+V1 confidence values:
+
+- `high`: directly supported by cited corpus/artifact evidence or a narrow
+  inference from strong evidence.
+- `medium`: supported by relevant evidence but requiring domain reasoning or an
+  unresolved user observation.
+- `low`: plausible but weakly supported; should usually be framed as a question
+  to investigate, not as a recommendation.
+
 Label enforcement rules:
 
 - `manual_evidence` requires at least one source unit id and locator id from the
   retrieved corpus.
 - `artifact_evidence` requires at least one artifact claim id.
-- `inference` requires at least one evidence input, such as cited source units,
-  artifact claims, or prior structured claims.
+- `inference` requires at least one evidence input. This can be non-empty
+  `depends_on_claim_ids`, direct source-unit/locator references, or artifact
+  claim references.
 - `general_domain_knowledge` must be explicitly marked as not sourced from the
   active corpus and cannot be used as the sole support for a repair conclusion,
   legal conclusion, medical conclusion, or other safety-sensitive action.
@@ -207,10 +243,24 @@ steps. In `diagnostic`, it may help rank or explain hypotheses, but it must not
 create a definitive cause or safety-sensitive recommendation without corpus or
 artifact support.
 
-Before returning an answer, a support verifier should reject or downgrade
-claims that violate these rules. In V1, this can be deterministic validation of
-the structured output. Later versions may add a separate verifier model, but the
+Before returning an answer, a support verifier should reject or downgrade claims
+that violate these rules. In V1, this can be deterministic validation of the
+structured output. Later versions may add a separate verifier model, but the
 first implementation should not rely on prompt compliance alone.
+
+Verifier behavior on violations:
+
+1. Reject invalid `manual_evidence` and `artifact_evidence` labels when the
+   required source-unit/locator or artifact-claim ids are missing.
+2. Allow one agent retry to repair labels or remove unsupported claims.
+3. If retry still fails, remove the unsupported claim from the answer or move it
+   to `general_domain_knowledge` only when the mode allows that label and the
+   claim is not safety-sensitive.
+4. Never downgrade an unsupported evidence claim into `inference` unless the
+   claim has valid evidence inputs through `depends_on_claim_ids`, source
+   references, or artifact references.
+5. Return partial insufficient evidence when a required answer section cannot be
+   repaired without violating label rules.
 
 ## Evidence Discipline
 
@@ -236,12 +286,9 @@ The answer must make source support explicit:
 4. **Safety boundaries:** conditions where the system should recommend stopping
    work or avoiding use until inspection.
 
-If the support verifier cannot validate a claim label, the answer should either:
-
-- downgrade the claim to a weaker label,
-- move it into a clearly marked "general domain note,"
-- ask for clarification, or
-- return insufficient evidence for that part of the answer.
+If the support verifier cannot validate a claim label after the retry budget,
+the answer should either ask for clarification or return insufficient evidence
+for that part of the answer.
 
 It should not silently present an unverifiable claim as evidence-backed.
 
@@ -310,15 +357,6 @@ candidate observation or issue, not an automatically canonical diagnostic rule.
 The UI should not require the user to pick a mode before every question. V1
 should auto-detect the likely mode and show the selected mode visibly.
 
-The UI should allow override when detection is wrong:
-
-- Direct
-- Procedure
-- Troubleshoot
-- Explain
-- What-if
-- Plan work
-
 For diagnostic/troubleshooting mode, the UI should present answer sections that
 make evidence and inference easy to scan.
 
@@ -355,9 +393,12 @@ only in rendered answer text. A V1 response should include:
 - labeled answer sections or claims
 - citation/source-unit ids attached to evidence labels
 - retrieval diagnostics and budget usage
+- estimated token usage when available
 
 Existing direct/procedure answer fields can remain for compatibility, but the
 new reasoning response shape should be available to the UI and MCP surfaces.
+Token-budget controls are not part of the first workshop diagnostic slice, but
+the API should preserve enough diagnostics to add them later.
 
 ## Evaluation And Success Criteria
 
@@ -366,9 +407,9 @@ direct lookup.
 
 V1 diagnostic eval should include:
 
-- at least 8 symptom-style questions across suspension, steering, wheel/hub,
+- at least 12 symptom-style questions across suspension, steering, wheel/hub,
   drivetrain, and braking-adjacent symptoms
-- at least 3 adversarial questions where the corpus does not support a specific
+- at least 4 adversarial questions where the corpus does not support a specific
   cause and the expected behavior is to ask for observation or give only
   bounded hypotheses
 - label-correctness checks for `manual_evidence`, `inference`,
@@ -380,10 +421,15 @@ Initial success target before enabling diagnostic mode by default:
 
 - zero `manual_evidence` claims without valid source-unit and locator ids
 - zero definitive causal diagnoses when the corpus only supports hypotheses
-- at least 80% correct mode classification on the diagnostic eval set
+- mode classification accuracy is tracked but not a hard release gate until the
+  eval set reaches at least 25 mode-classification examples
 - no safety-relevant answer that omits a stop/inspect boundary when the prompt
   describes severe vibration, braking instability, steering looseness, or wheel
   looseness
+
+Once the mode-classification eval has at least 25 examples, the initial hard
+gate should be at least 85% correct primary-mode classification with every
+misclassification reviewed for safety impact.
 
 User usefulness can be tracked later, but it is not a substitute for label and
 citation correctness.
