@@ -237,6 +237,66 @@ related_procedures:
 
 Artifacts may include extracted, not-yet-validated claims. They do not need to be perfect before they become useful, but answer surfaces must expose trust state clearly.
 
+### Automotive Component-Spec Claim Specificity
+
+Automotive component-spec artifacts must preserve service-manual qualifiers
+rather than flattening a component into one generic value. A component-level
+query such as "lower control arm torque" is often under-specified because the
+manual can contain distinct values for the same component family: chassis vs
+stub axle/hub-holder, front vs rear arm, nut vs screw, removal vs reattachment,
+or staged tightening. Artifact-first answering is allowed only when the
+artifact claim is specific enough for the user question.
+
+V1 component-spec claims should carry a structured `spec_qualifiers` object
+with answer-relevant labels:
+
+```yaml
+spec_qualifiers:
+  component: lower arm
+  fastener: nut
+  joint_location: chassis
+  position: rear lower arm
+  procedure_context: rear suspension reattachment
+  operation: tightening
+```
+
+The qualifier fields are intentionally sparse. A claim should only populate a
+field when the source text or nearby heading supports it. Missing qualifiers
+must reduce answer confidence; they must not be inferred from broad component
+aliases alone.
+
+The extractor should reject noisy component labels before assembling artifacts.
+Labels such as one-letter OCR fragments, stopwords, bare units, punctuation,
+and generic instruction fragments ("tighten the screws to") are not valid
+component entities. They may remain raw source text for retrieval, but they
+must not become current component-spec artifacts.
+
+Artifact answer selection must use token-boundary matching and qualifier
+coverage, not substring matching. A query containing the word "I" must not
+match an artifact whose only component term is `i`; a query containing
+"lower control arm" should prefer claims whose component or alias matches that
+phrase and then inspect whether the requested fastener, position, joint, or
+procedure context is also specified.
+
+When several artifact claims match the same component but differ in
+answer-relevant qualifiers, artifact-first answering should not return the
+first or highest-scored claim as a single definitive answer. It should either:
+
+- return a multi-claim answer that labels each value with its qualifier set, or
+- ask a clarification question when the user's wording requires choosing one
+  value.
+
+For example, "Torque lower control arm" should surface that the manual has
+multiple lower-arm torque claims, including lower arm to stub axle/hub-holder
+and lower arm to chassis variants. A more specific question such as "What is
+the rear lower arm nut to chassis torque?" may answer from one claim if the
+matching claim carries those qualifiers and has usable provenance.
+
+Caching remains a performance layer only. Cached answers may reuse artifact or
+retrieval outputs, but they do not replace artifact claims as the reviewable
+source of truth. Validated artifacts outrank cached raw answers; disputed
+artifacts must not be hidden by cache hits.
+
 Terminology workbench mappings and artifact aliases should be one system, not two. The workbench should create scoped alias claims, and the artifact assembler should project those aliases into relevant artifacts. Artifact-local aliases may still be displayed for convenience, but the durable source of truth is the scoped terminology/alias claim so `vehicle_repair_v1`, `ferrari_v1`, `ferrari_360_v1`, and source-specific mappings do not drift from artifact records.
 
 A terminology mapping can exist before a matching artifact exists. In that case it remains in the terminology layer and is projected into future artifacts when an assembler later creates an artifact whose scope/entity matches the mapping's applicability layers.
