@@ -63,7 +63,8 @@ source structure. For Ferrari, the source profile understands `Tavola`, `Rif`,
 numerical index. Other catalog profiles can map different structures into the
 same normalized graph.
 
-The procedure linker connects workshop procedures to catalog graph nodes using:
+The linker connects workshop procedures or source units to catalog graph nodes
+using:
 
 - explicit part, assembly, table, or part-number mentions
 - terminology mappings from the active retrieval profile
@@ -74,6 +75,68 @@ The procedure linker connects workshop procedures to catalog graph nodes using:
 Every link must expose whether it is explicit or inferred. Inference is allowed
 because useful procedure parts lists often require it, but inferred links must
 carry rationale, confidence factors, and citations.
+
+Implementation should be milestone-gated. The durable model includes inferred
+links, but v0 should prove catalog extraction and explicit linking before any
+inferred parts are included in default answers.
+
+## Milestone Sequence
+
+### Milestone 1: Catalog Extraction V0
+
+Extract a namespaced parts graph from the Ferrari spare parts catalog only.
+
+Included:
+
+- catalog table metadata
+- row-level part records
+- callout references
+- part numbers
+- quantities
+- Italian and English descriptions when parseable
+- source notes such as `Not as spare part` and `Possible fitting`
+- reverse numerical index records
+- row-level confidence factors
+
+Excluded:
+
+- procedure linking
+- inferred parts
+- vendor shopping
+- cross-catalog dedupe
+
+This milestone is complete only when representative Ferrari tables parse above
+the thresholds in the Verification section.
+
+### Milestone 2: Explicit Source-Unit Linking V0
+
+Link workshop source units to catalog rows only when the source unit explicitly
+mentions a part number, catalog table, assembly/table title, or exact part
+description that can be matched to one catalog row or table within the active
+namespace.
+
+V0 does not require first-class procedure artifacts. It may link from page,
+section, or source-unit ids. Procedure artifacts can consume the same links later
+when procedure extraction exists.
+
+Excluded:
+
+- `strong_inferred` and `weak_inferred` output
+- generated freeform rationale
+- purchase-ready parts lists
+
+### Milestone 3: Inferred Linking V1
+
+Add `strong_inferred` and `weak_inferred` candidates after explicit linking has
+ground truth and catalog extraction is stable. Inference requires deterministic
+or rubric-backed rationale, confidence factors, and eval cases that pin the
+boundary between tiers.
+
+### Milestone 4: Review Surface V1
+
+Expose explicit, inferred, and review-held candidates in the answer/planning
+surface with citations, fitment warnings, and source notes. The surface may help
+the user inspect a parts list, but still does not perform vendor shopping.
 
 ## Entity Namespacing
 
@@ -112,6 +175,27 @@ Entities should have two identities:
 The same pattern should support later parts-based domains, such as industrial
 equipment, medical devices, appliances, or facilities equipment, without changing
 the core relationship model.
+
+## Cross-Namespace Identity Policy
+
+V1 does not deduplicate artifacts across namespaces. A Ferrari 360 Modena row and
+a Ferrari 360 Spider row remain separate scoped records even if they share a part
+number. This keeps fitment, source edition, and catalog-note differences visible.
+
+Shared part numbers, matching manufacturer part ids, or matching canonical
+concept candidates may create equivalence observations:
+
+```yaml
+equivalence_observation:
+  basis: same_manufacturer_part_number
+  refs:
+    - vehicle_repair:ferrari:360_modena:spare_parts_catalogue_2000:part:183100
+    - vehicle_repair:ferrari:360_spider:spare_parts_catalogue_2001:part:183100
+  trust_state: extracted
+```
+
+Those observations are useful for search and review, but they do not merge the
+underlying scoped records in v1.
 
 ## Parts Catalog Artifact
 
@@ -158,10 +242,58 @@ validation signal. For Ferrari, the index maps part numbers back to table and
 position. If the extracted table rows disagree with the index, the artifact
 should keep both observations and mark the conflict or low confidence.
 
+## Catalog Extraction Strategy
+
+Catalog extraction is the first load-bearing risk. V0 should be
+deterministic-first with bounded model assistance only after candidate structure
+has been extracted.
+
+For the Ferrari catalog, extraction should use page text and layout before image
+interpretation:
+
+1. Detect table boundaries from repeated `Tavola`, `TAV.`, and footer patterns.
+2. Split diagram pages from tabular parts-list pages.
+3. Parse parts-list rows from layout text using the known column pattern:
+   `Rif`, `Dis.N/Part.N`, `Q.ty`, Italian description, English description.
+4. Attach multiline notes to the preceding row when indentation and language
+   pairing support that relationship.
+5. Parse the numerical index separately and cross-check table/ref locations.
+6. Use an LLM only to classify already-extracted note text or resolve ambiguous
+   multiline row continuation, not to invent rows or part numbers.
+
+Field robustness should be tracked separately:
+
+| Field | Expected robustness | Notes |
+| --- | --- | --- |
+| `part_number` | high | Usually numeric and column-aligned. |
+| `table_ref` | high | Repeated in title/footer and index. |
+| `callout_ref` | high | Numeric or `-`; may repeat for alternates. |
+| `quantity` | medium | May be blank, `-`, or variant-dependent. |
+| `description_en` | medium | Multi-line descriptions can wrap. |
+| `description_it` | medium | Useful for bilingual terminology but not required for English answers. |
+| `notes` | fragile | Includes fitment, availability, color, and oversize constraints. |
+
+Extraction confidence is row-level in v0, with optional field-level diagnostics.
+Do not expose decorative numeric confidence until the factors are defined and
+used. Store confidence factors such as:
+
+- required fields parsed
+- row shape matched expected profile
+- quantity parsed as valid value or known marker
+- note continuation was deterministic vs model-assisted
+- table/ref agreed with reverse index
+- duplicate callout or duplicate part number required review
+- source page layout was malformed
+
+If a numeric score is added later, it must be derived from these factors and
+documented with threshold behavior.
+
 ## Procedure Parts Link
 
 `procedure_parts_link` connects a procedure structure to catalog graph nodes.
 It can point to a table, assembly, callout, part, or set of candidate nodes.
+In v0, `procedure_ref` may be a source unit or section reference rather than a
+durable `procedure_artifact`.
 
 Example:
 
@@ -170,11 +302,17 @@ procedure_parts_link:
   procedure_ref: vehicle_repair:ferrari:360_modena:wsm_1999:procedure:gearbox_flange_grommet_replacement
   catalog_ref: vehicle_repair:ferrari:360_modena:spare_parts_catalogue_2000:table:26
   relationship_basis: strong_inferred
-  confidence: 0.74
-  rationale:
-    - procedure mentions gearbox housing external components
-    - catalog table 26 is Gearbox - Covers
-    - component terminology overlaps with flange, cover, bearing, and gasket terms
+  confidence_factors:
+    - procedure_component_term_matches_catalog_table_title
+    - namespace_scope_matches
+    - catalog_table_contains_matching_part_family_terms
+  rationale_facts:
+    - source: procedure
+      fact: gearbox housing external components
+    - source: catalog_table
+      fact: table 26 is Gearbox - Covers
+    - source: terminology
+      fact: flange, cover, bearing, and gasket terms overlap
   provenance:
     - source_id: source-ferrari-360-wsm
       unit_id: page-or-section-id
@@ -187,12 +325,46 @@ procedure_parts_link:
 | Basis | Meaning | Default answer behavior |
 | --- | --- | --- |
 | `explicit` | Procedure or catalog text names the part, part number, assembly, or table directly. | Include by default. |
-| `strong_inferred` | Procedure component maps cleanly to a catalog assembly or table. | Include by default with inference label. |
-| `weak_inferred` | Likely supporting parts or consumables inferred from assembly context. | Show as suggested. |
+| `strong_inferred` | Procedure component maps cleanly to a catalog assembly or table through deterministic terminology, title, and namespace support. | Include by default with inference label after v1 gates pass. |
+| `weak_inferred` | Likely supporting parts or consumables inferred from same-table or adjacent-assembly context but not named by the procedure. | Show as suggested. |
 | `uncertain` | Candidate needs review because scope, fitment, or mapping is ambiguous. | Hold for review. |
 
 The answer surface must never flatten these tiers into a single undifferentiated
 parts list.
+
+## Tier Rules And Rationale
+
+Evidence tier classification should be deterministic in v0 and rubric-backed in
+v1.
+
+`explicit` applies when one of these is true:
+
+- the source unit mentions a manufacturer part number that matches exactly one
+  catalog row in the active namespace
+- the source unit mentions a catalog table/plate identifier
+- the source unit mentions an exact catalog assembly title in the same namespace
+- the source unit contains an exact part description and the namespace/table
+  context resolves it to one candidate
+
+`strong_inferred` applies when all of these are true:
+
+- the source unit names a component, operation, or assembly term
+- the term normalizes through an approved terminology mapping or exact title
+  overlap
+- the active namespace resolves to one catalog table or assembly family
+- no fitment, side, color, oversize, or availability note forces review
+
+`weak_inferred` applies when the part is plausible from same-table or
+same-assembly context, but the procedure does not name it and deterministic
+evidence does not isolate it as required. Common examples are fasteners, washers,
+clips, seals, and gaskets adjacent to a named component.
+
+`uncertain` applies when multiple namespaces, variants, sides, catalog tables, or
+availability notes could change the answer.
+
+Rationale should be stored as structured facts, not freeform prose. Display text
+can be generated from those facts, but the stored record should remain
+reproducible when sources are reprocessed.
 
 ## Link Policy
 
@@ -227,6 +399,23 @@ The system should also surface order and fitment warnings when relevant, such as
 confirming chassis and engine applicability before ordering or noting that a
 component may only be supplied as part of a complete assembly.
 
+## Terminology Integration
+
+The linker may reuse terminology layers from `vehicle_repair_v1`, but it consumes
+more than query-expansion aliases. Link-time terminology records should expose:
+
+- `alias`
+- `canonical_term`
+- `applicability_layers`
+- `term_kind`, such as component, assembly, operation, fastener, consumable, or
+  tool
+- optional `catalog_match_hints`, such as table-title term, part-description
+  term, or note term
+
+Aliases without a `term_kind` can help retrieve evidence, but they should not by
+themselves create a `strong_inferred` link. Strong inference requires scoped
+component or assembly terminology plus catalog namespace support.
+
 ## Architecture And Data Flow
 
 The first implementation should extend the existing workshop/manual dogfood
@@ -237,7 +426,7 @@ raw sources
   -> source units/pages
   -> catalog structure extraction
   -> namespaced parts catalog artifact
-  -> procedure structure extraction
+  -> source-unit or procedure-structure linking
   -> evidence-tiered procedure_parts_link candidates
   -> reviewable answer/planning surface
 ```
@@ -262,7 +451,41 @@ The output contract should support reviewable planning:
 
 ```yaml
 required_parts:
-  explicit: []
+  explicit:
+    - item_id: parts-list-item-1
+      namespace:
+        domain: vehicle_repair
+        manufacturer: Ferrari
+        product_family: 360
+        model: 360 Modena
+        variant: null
+        source_id: source-ferrari-360-spare-parts-2000
+      part_number: "183100"
+      manufacturer_label: Ferrari
+      description: Brakes hose
+      quantity:
+        value: 4
+        basis: catalog_row
+      catalog_refs:
+        - table_id: tavola_33
+          table_title: Brake system
+          callout_ref: "12"
+          source_unit_id: catalog-page-or-table-unit
+      relationship_basis: explicit
+      confidence_factors:
+        - exact_part_number_match
+        - namespace_scope_matches
+        - reverse_index_agrees
+      rationale_facts:
+        - source: procedure
+          fact: source unit explicitly mentions part number 183100
+      fitment_notes: []
+      warnings: []
+      provenance:
+        - source_id: source-ferrari-360-wsm
+          unit_id: procedure-source-unit
+        - source_id: source-ferrari-360-spare-parts-2000
+          unit_id: catalog-page-or-table-unit
   inferred: []
   needs_review: []
 source_links:
@@ -277,6 +500,11 @@ Vendor shopping remains downstream. It can later consume normalized part numbers
 manufacturer labels, aliases, fitment notes, and provenance. It should not
 influence catalog extraction or procedure linking.
 
+Each item in `inferred` and `needs_review` uses the same record shape as
+`explicit`. The `relationship_basis`, `confidence_factors`, `rationale_facts`,
+`fitment_notes`, and `warnings` fields explain why the item is not explicit or
+why it requires review.
+
 ## Error Handling
 
 Uncertainty is part of the output model.
@@ -284,7 +512,7 @@ Uncertainty is part of the output model.
 Catalog parse uncertainty:
 
 - Keep the raw row citation.
-- Mark extraction confidence low.
+- Mark extraction confidence low through visible confidence factors.
 - Avoid using the row as an included part unless later validated.
 
 Namespace ambiguity:
@@ -307,26 +535,63 @@ Variant-dependent parts:
 - Left/right, oversize, color, chassis/engine, or `Possible fitting` cases go to
   `hold_for_review` unless the procedure or user scope resolves the variant.
 
+## Incremental Re-Extraction
+
+V1 should favor re-derivation over partial mutation. Every extraction run should
+record:
+
+- extractor/profile version
+- source id and content fingerprint
+- source-unit fingerprints
+- terminology/profile versions used for linking
+- output artifact ids and link ids
+
+When a catalog edition, source fingerprint, parser profile, or terminology layer
+changes, affected catalog artifacts and procedure links should be marked stale
+and re-derived. Existing reviewed decisions should not be overwritten silently;
+they should be carried forward only when their referenced scoped rows still
+exist and their source fingerprints match, otherwise they should return to
+review.
+
 ## Verification
 
 Verification should combine focused parser tests and eval cases:
 
-- Parse representative Ferrari catalog tables into expected rows.
+Catalog extraction gates:
+
+- Hand-code ground truth for at least 20 Ferrari catalog tables across
+  mechanical, body, electrical, and variant-heavy examples.
+- Achieve at least 95% row precision and 90% row recall on the ground-truth
+  tables before using extracted rows for linking.
+- Achieve at least 98% precision for part numbers on those tables.
+- Preserve source notes for at least 90% of rows that have notes in ground truth.
 - Verify that extracted table/ref positions agree with the reverse numerical
-  index for selected part numbers.
-- Confirm catalog notes are preserved and surfaced in output.
-- Link known workshop procedures to expected catalog tables with the correct
-  evidence tier.
+  index for at least 100 sampled index entries when an index exists.
+
+Linking gates:
+
+- Build at least 10 explicit-link eval cases before enabling procedure parts
+  output.
+- Require 100% precision for `explicit` part-number links in the eval set.
+- Do not enable `strong_inferred` default inclusion until at least 20 inferred
+  link eval cases distinguish `strong_inferred`, `weak_inferred`, and
+  `uncertain`.
 - Ensure inferred parts are never labeled explicit.
 - Ensure shopping fields and vendor behavior are absent from this milestone.
-- Regression-test manufacturer neutrality by keeping Ferrari-specific parsing in
-  a source profile, not in the core artifact model.
+
+Manufacturer-neutral checks:
+
+- Keep Ferrari-specific parsing in a source profile, not in the core artifact
+  model.
+- Validate generic row-shape consistency, required-field completeness,
+  part-number format, quantity parse status, duplicate callout detection, and
+  callout-to-row coverage where the source exposes callouts.
 
 The first measurable slice is:
 
 ```text
-Can Prescient build a namespaced parts graph and produce reviewable explicit or
-inferred links from procedures to parts?
+Can Prescient parse a representative Ferrari parts graph with measured accuracy
+and produce reviewable explicit links from workshop source units to catalog rows?
 ```
 
 ## Later Milestone: Vendor Shopping
